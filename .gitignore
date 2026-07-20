@@ -10,6 +10,7 @@ data/
 
 # Streamlit（配置可提交，真实 Secrets 永不提交）
 .streamlit/secrets.toml
+.env
 
 # IDE
 .idea/
@@ -24,6 +25,7 @@ data/
 !复星旅文DeepResearch研究主题目录_更新版_V4.xlsx
 
 # 虚拟环境
-.venv/
+.venv
+.venv_broken_*/
 venv/
 env/

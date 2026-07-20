@@ -531,7 +531,7 @@ with tasks_tab:
 st.markdown("---")
 st.caption(
     f"数据库：`{os.getenv('DATABASE_PATH', 'data/industry_news.db')}` · "
-    f"Gemini：`{os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')}` · "
+    f"Gemini：`{os.getenv('GEMINI_MODEL', 'gemini-flash-latest')}` · "
     f"模式：`{'cloud_demo' if cloud_demo else 'local'}` · "
     "原始主题 Excel 不会被程序修改"
 )

@@ -30,7 +30,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Gemini 模型名称（可通过环境变量覆盖）
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 
 # API 调用重试配置
 MAX_RETRIES = 3
@@ -173,7 +173,7 @@ def analyze_article_with_gemini(
         article_url: 原文链接
         article_text: 清洗后的正文
         industry_keyword: 行业关键词
-        model: Gemini 模型名，默认 gemini-2.5-flash
+        model: Gemini 模型名，默认使用最新 Flash 别名
 
     Returns:
         NewsCaseSchema 实例；失败时返回 None
