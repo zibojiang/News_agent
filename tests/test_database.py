@@ -7,6 +7,7 @@ from pathlib import Path
 
 from database import (
     append_case,
+    append_cases_batch_with_summary,
     get_last_run_time,
     initialize_database,
     load_cases,
@@ -97,6 +98,31 @@ class DatabaseTestCase(unittest.TestCase):
         self.assertEqual(len(load_cases()), 4)
         self.assertEqual(len(load_cases(qualified_only=True)), 2)
         self.assertEqual(len(load_cases(qualified_only=False)), 2)
+
+    def test_batch_summary_distinguishes_news_cases_and_duplicates(self) -> None:
+        low_score = self._case(
+            title="低分新闻",
+            url="https://example.com/news/2",
+            content_hash="hash-two",
+            relevance_score=45,
+            bullet_points=[],
+            evidence_quotes=[],
+        )
+        result = append_cases_batch_with_summary(
+            [self._case(), low_score], min_score=70
+        )
+
+        self.assertEqual(result["news_inserted"], 2)
+        self.assertEqual(result["qualified_inserted"], 1)
+        self.assertEqual(result["duplicates"], 0)
+        self.assertEqual(result["write_failed"], 0)
+        self.assertEqual(len(load_cases()), 2)
+
+        duplicate_result = append_cases_batch_with_summary(
+            [self._case()], min_score=70
+        )
+        self.assertEqual(duplicate_result["news_inserted"], 0)
+        self.assertEqual(duplicate_result["duplicates"], 1)
 
     def test_review_status_and_task_log(self) -> None:
         self.assertTrue(append_case(self._case(), min_score=70))

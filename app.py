@@ -167,6 +167,74 @@ def _excel_bytes(df: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
+def _render_run_summary(summary: dict[str, Any]) -> None:
+    """展示最近一次任务的分阶段统计和逐篇诊断信息。"""
+    result_cols = st.columns(5)
+    result_cols[0].metric("提取正文", summary.get("processed", 0))
+    result_cols[1].metric("AI 成功", summary.get("analyzed", 0))
+    result_cols[2].metric("新闻新增", summary.get("news_saved", 0))
+    result_cols[3].metric("案例新增", summary.get("saved", 0))
+    failure_count = int(summary.get("analysis_failed", 0)) + int(
+        summary.get("write_failed", 0)
+    )
+    result_cols[4].metric("失败", failure_count)
+
+    st.caption(
+        f"未达案例门槛：{summary.get('unqualified', 0)} · "
+        f"重复跳过：{summary.get('duplicates', 0)} · "
+        f"数据库写入失败：{summary.get('write_failed', 0)}"
+    )
+
+    if summary.get("news_saved"):
+        st.success(
+            f"已新增 {summary['news_saved']} 条新闻到新闻池，"
+            f"其中 {summary.get('saved', 0)} 条进入案例库。"
+        )
+    elif summary.get("processed") and not summary.get("analyzed"):
+        st.error("已提取新闻正文，但 AI 分析全部失败，请查看错误详情。")
+    elif summary.get("write_failed"):
+        st.error("AI 分析已完成，但结果没有成功写入数据库。")
+    elif summary.get("duplicates") and summary.get("duplicates") == summary.get("analyzed"):
+        st.info("分析结果均已存在，本次没有重复写入新闻池。")
+    elif summary.get("processed"):
+        st.warning("任务已完成，但本次没有新增新闻，请查看逐篇明细。")
+
+    errors = summary.get("errors", [])
+    if errors:
+        with st.expander(f"错误详情（{len(errors)}）", expanded=True):
+            for error in errors:
+                st.error(error)
+
+    details = summary.get("details", [])
+    if details:
+        details_df = pd.DataFrame(details).rename(
+            columns={
+                "title": "新闻标题",
+                "url": "原文链接",
+                "score": "相关性",
+                "analysis_status": "AI 状态",
+                "qualification_status": "案例判定",
+                "storage_status": "写入状态",
+                "reason": "原因",
+            }
+        )
+        st.markdown("#### 本次逐篇处理明细")
+        st.dataframe(
+            details_df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "原文链接": st.column_config.LinkColumn(
+                    "原文链接", display_text="🔗 查看原文"
+                ),
+                "相关性": st.column_config.ProgressColumn(
+                    "相关性", min_value=0, max_value=100, format="%d"
+                ),
+                "原因": st.column_config.TextColumn("原因", width="large"),
+            },
+        )
+
+
 topics_df = load_topics(enabled_only=True)
 topic_records = topics_df.to_dict(orient="records")
 topic_options = {_topic_label(topic): topic for topic in topic_records}
@@ -248,6 +316,12 @@ if run_button:
     if not search_keyword.strip():
         st.error("请输入新闻搜索词")
     else:
+        st.session_state.pop("last_run_summary", None)
+        progress_bar = st.progress(0.0, text="正在准备新闻采集任务…")
+
+        def update_progress(message: str, value: float) -> None:
+            progress_bar.progress(value, text=message)
+
         with st.spinner(f"正在处理「{selected_label}」，请稍候…"):
             try:
                 run_summary = run_pipeline(
@@ -256,23 +330,18 @@ if run_button:
                     max_articles=int(max_articles),
                     topic=selected_topic,
                     trigger_type="manual",
+                    progress_callback=update_progress,
                 )
-                result_cols = st.columns(4)
-                result_cols[0].metric("分析文章", run_summary.get("processed", 0))
-                result_cols[1].metric("新增案例", run_summary.get("saved", 0))
-                result_cols[2].metric("低分/无数据", run_summary.get("skipped", 0))
-                result_cols[3].metric("错误", len(run_summary.get("errors", [])))
-                if run_summary.get("saved"):
-                    st.success(f"已新增 {run_summary['saved']} 条待审核量化案例。")
-                elif run_summary.get("processed"):
-                    st.info("分析完成，本次没有新的达标案例。")
-                for error in run_summary.get("errors", []):
-                    st.error(error)
+                st.session_state.last_run_summary = run_summary
             except ValueError as exc:
                 st.error(f"配置错误：{exc}")
             except Exception as exc:
                 logger.error("手动任务失败: %s", exc, exc_info=True)
                 st.error(f"运行异常：{exc}")
+
+last_run_summary = st.session_state.get("last_run_summary")
+if last_run_summary:
+    _render_run_summary(last_run_summary)
 
 dashboard_tab, news_tab, cases_tab, topics_tab, tasks_tab = st.tabs(
     ["📊 仪表盘", "📰 新闻池", "📚 案例库", "🎯 主题管理", "⏱️ 任务中心"]

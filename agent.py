@@ -14,14 +14,14 @@ import os
 import re
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field, ValidationError
 
-from database import append_cases_batch, record_task_run
+from database import append_cases_batch_with_summary, record_task_run
 from scraper import fetch_and_extract_batch
 
 # 加载 .env 环境变量
@@ -70,6 +70,50 @@ class NewsCaseSchema(BaseModel):
         le=100,
         description="0-100 的行业相关性打分，100 表示高度相关",
     )
+
+
+class ArticleAnalysisError(RuntimeError):
+    """单篇新闻经过重试后仍无法完成 Gemini 分析。"""
+
+
+def _classify_gemini_error(exc: Exception, model_name: str) -> str:
+    """将 SDK 异常转换为不包含密钥的用户可读信息。"""
+    message = str(exc).lower()
+    if any(key in message for key in ("429", "quota", "rate", "resource_exhausted")):
+        return "Gemini 配额不足或请求频率受限（429）"
+    if any(key in message for key in ("401", "403", "api key", "permission_denied")):
+        return "Gemini API Key 无效、已失效或无模型访问权限"
+    if "not found" in message or "404" in message:
+        return f"Gemini 模型不可用：{model_name}"
+    if any(key in message for key in ("timeout", "deadline", "timed out")):
+        return "Gemini 请求超时"
+    return f"Gemini API 调用失败（{type(exc).__name__}）"
+
+
+def _qualification_reasons(result: NewsCaseSchema, min_score: int) -> list[str]:
+    """返回分析结果未进入案例库的具体原因。"""
+    reasons: list[str] = []
+    if result.relevance_score < min_score:
+        reasons.append(f"相关性 {result.relevance_score} 低于门槛 {min_score}")
+    if not result.bullet_points:
+        reasons.append("未提取到量化案例")
+    if not result.evidence_quotes:
+        reasons.append("没有可在正文中验证的证据原文")
+    return reasons
+
+
+def _notify_progress(
+    callback: Callable[[str, float], None] | None,
+    message: str,
+    value: float,
+) -> None:
+    """通知前端任务阶段；前端异常不应中断采集流水线。"""
+    if callback is None:
+        return
+    try:
+        callback(message, max(0.0, min(1.0, value)))
+    except Exception as exc:
+        logger.warning("更新任务进度失败: %s", type(exc).__name__)
 
 
 # 商业分析师 Prompt 模板
@@ -161,7 +205,7 @@ def analyze_article_with_gemini(
     industry_keyword: str,
     topic: dict[str, Any] | None = None,
     model: str | None = None,
-) -> NewsCaseSchema | None:
+) -> NewsCaseSchema:
     """
     调用 Gemini 对单篇文章进行结构化案例分析。
 
@@ -176,11 +220,13 @@ def analyze_article_with_gemini(
         model: Gemini 模型名，默认使用最新 Flash 别名
 
     Returns:
-        NewsCaseSchema 实例；失败时返回 None
+        NewsCaseSchema 实例
+
+    Raises:
+        ArticleAnalysisError: 正文为空或重试后仍无法获得有效结果
     """
     if not article_text.strip():
-        logger.warning("正文为空，跳过分析: %s", article_title)
-        return None
+        raise ArticleAnalysisError("新闻正文为空")
 
     client = _get_gemini_client()
     model_name = model or DEFAULT_MODEL
@@ -195,6 +241,7 @@ def analyze_article_with_gemini(
         article_title, article_url, article_text, industry_keyword, topic
     )
 
+    last_error = "Gemini 未返回有效结果"
     for attempt in range(1, MAX_RETRIES + 1):
         raw_text = ""
         try:
@@ -227,6 +274,7 @@ def analyze_article_with_gemini(
 
             raw_text = response.text
             if not raw_text:
+                last_error = "Gemini 返回空响应"
                 logger.warning("Gemini 返回空响应")
                 continue
 
@@ -249,7 +297,8 @@ def analyze_article_with_gemini(
             return parsed
 
         except ValidationError as exc:
-            logger.error("Gemini 返回 JSON 校验失败: %s", exc)
+            last_error = "Gemini 结构化输出不符合字段要求"
+            logger.error("Gemini 返回 JSON 校验失败: %s", type(exc).__name__)
             # 尝试手动解析兜底
             try:
                 if raw_text:
@@ -266,23 +315,24 @@ def analyze_article_with_gemini(
 
         except Exception as exc:
             error_msg = str(exc).lower()
+            last_error = _classify_gemini_error(exc, model_name)
             # 识别限流 / 配额错误，使用指数退避重试
             if any(kw in error_msg for kw in ("429", "rate", "quota", "resource_exhausted")):
                 delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
                 logger.warning(
-                    "Gemini API 限流/配额不足，%ds 后重试 (attempt %d): %s",
+                    "Gemini API 限流/配额不足，%ds 后重试 (attempt %d)",
                     delay,
                     attempt,
-                    exc,
                 )
-                time.sleep(delay)
+                if attempt < MAX_RETRIES:
+                    time.sleep(delay)
             else:
-                logger.error("Gemini API 调用失败: %s", exc, exc_info=True)
+                logger.error("Gemini API 调用失败: %s", last_error)
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_BASE_DELAY)
 
-    logger.error("Gemini 分析最终失败: %s", article_title)
-    return None
+    logger.error("Gemini 分析最终失败: %s — %s", article_title, last_error)
+    raise ArticleAnalysisError(last_error)
 
 
 def run_pipeline(
@@ -291,6 +341,7 @@ def run_pipeline(
     max_articles: int = 8,
     topic: dict[str, Any] | None = None,
     trigger_type: str = "manual",
+    progress_callback: Callable[[str, float], None] | None = None,
 ) -> dict[str, Any]:
     """
     执行完整的「抓取 → 提炼 → 入库」工作流。
@@ -301,7 +352,7 @@ def run_pipeline(
         max_articles: 单次最多处理文章数
 
     Returns:
-        运行摘要字典，包含 processed/saved/errors 等统计信息
+        运行摘要字典，包含 AI、新闻入库、案例入库及错误统计
     """
     topic = topic or {}
     summary: dict[str, Any] = {
@@ -311,11 +362,19 @@ def run_pipeline(
         "trigger_type": trigger_type,
         "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "processed": 0,
+        "analyzed": 0,
+        "analysis_failed": 0,
+        "news_saved": 0,
         "saved": 0,
+        "unqualified": 0,
+        "duplicates": 0,
+        "write_failed": 0,
         "skipped": 0,
         "errors": [],
         "cases": [],
+        "details": [],
     }
+    case_detail_indexes: list[int] = []
 
     logger.info(
         "=== 开始 Industry News Agent 流水线 === topic=%s keyword=%s",
@@ -324,13 +383,15 @@ def run_pipeline(
     )
 
     try:
+        _notify_progress(progress_callback, "正在搜索新闻并提取正文…", 0.05)
         try:
             articles = fetch_and_extract_batch(
                 industry_keyword, max_articles=max_articles
             )
         except Exception as exc:
-            logger.error("抓取阶段异常: %s", exc, exc_info=True)
-            summary["errors"].append(f"抓取失败: {exc}")
+            error = f"抓取失败：{type(exc).__name__}: {exc}"
+            logger.error("抓取阶段异常: %s", type(exc).__name__)
+            summary["errors"].append(error)
             return summary
 
         if not articles:
@@ -338,8 +399,30 @@ def run_pipeline(
             logger.warning("流水线结束：无可用文章")
             return summary
 
-        for article in articles:
+        total_articles = len(articles)
+        _notify_progress(
+            progress_callback,
+            f"已提取 {total_articles} 篇正文，开始 AI 分析…",
+            0.15,
+        )
+
+        for index, article in enumerate(articles, start=1):
             summary["processed"] += 1
+            detail = {
+                "title": str(article.get("title", "")),
+                "url": str(article.get("url", "")),
+                "score": None,
+                "analysis_status": "失败",
+                "qualification_status": "-",
+                "storage_status": "未写入",
+                "reason": "",
+            }
+            _notify_progress(
+                progress_callback,
+                f"AI 分析第 {index}/{total_articles} 篇：{detail['title'][:35]}",
+                0.15 + 0.7 * ((index - 1) / total_articles),
+            )
+
             try:
                 result = analyze_article_with_gemini(
                     article_title=article["title"],
@@ -349,18 +432,50 @@ def run_pipeline(
                     topic=topic,
                 )
             except ValueError as exc:
-                summary["errors"].append(str(exc))
-                logger.error("致命错误，终止流水线: %s", exc)
+                reason = str(exc)
+                summary["analysis_failed"] += 1
+                summary["skipped"] += 1
+                summary["errors"].append(reason)
+                detail["reason"] = reason
+                summary["details"].append(detail)
+                logger.error("致命配置错误，终止流水线")
                 break
+            except ArticleAnalysisError as exc:
+                reason = str(exc)
+                summary["analysis_failed"] += 1
+                summary["skipped"] += 1
+                summary["errors"].append(
+                    f"AI 分析失败 [{detail['title'][:60]}]：{reason}"
+                )
+                detail["reason"] = reason
+                summary["details"].append(detail)
+                continue
             except Exception as exc:
-                summary["errors"].append(f"分析异常 [{article['title']}]: {exc}")
-                logger.error("单篇分析异常: %s", exc, exc_info=True)
+                reason = f"未预期的分析异常：{type(exc).__name__}"
+                summary["analysis_failed"] += 1
+                summary["skipped"] += 1
+                summary["errors"].append(
+                    f"AI 分析失败 [{detail['title'][:60]}]：{reason}"
+                )
+                detail["reason"] = reason
+                summary["details"].append(detail)
+                logger.error("单篇分析异常: %s", type(exc).__name__)
                 continue
 
             if result is None:
+                reason = "Gemini 未返回可用分析结果"
+                summary["analysis_failed"] += 1
                 summary["skipped"] += 1
+                summary["errors"].append(
+                    f"AI 分析失败 [{detail['title'][:60]}]：{reason}"
+                )
+                detail["reason"] = reason
+                summary["details"].append(detail)
                 continue
 
+            summary["analyzed"] += 1
+            detail["score"] = result.relevance_score
+            detail["analysis_status"] = "成功"
             case_dict = {
                 "discovered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "published_at": article.get("published_at", ""),
@@ -383,30 +498,72 @@ def run_pipeline(
             }
             summary["cases"].append(case_dict)
 
-            if (
-                result.relevance_score < min_score
-                or not result.bullet_points
-                or not result.evidence_quotes
-            ):
+            qualification_reasons = _qualification_reasons(result, min_score)
+            if qualification_reasons:
+                summary["unqualified"] += 1
                 summary["skipped"] += 1
+                detail["qualification_status"] = "未达标"
+                detail["reason"] = "；".join(qualification_reasons)
                 logger.info(
                     "分数/量化案例/证据未达门槛，仅保留新闻池: %s",
                     result.title[:40],
                 )
+            else:
+                detail["qualification_status"] = "达标"
 
-        try:
-            summary["saved"] = append_cases_batch(
-                summary["cases"], min_score=min_score
-            )
-        except Exception as exc:
-            summary["errors"].append(f"入库失败: {exc}")
-            logger.error("入库异常: %s", exc, exc_info=True)
+            summary["details"].append(detail)
+            case_detail_indexes.append(len(summary["details"]) - 1)
+
+        if summary["cases"]:
+            _notify_progress(progress_callback, "正在写入新闻池并检查重复…", 0.9)
+            try:
+                write_summary = append_cases_batch_with_summary(
+                    summary["cases"], min_score=min_score
+                )
+                summary["news_saved"] = int(write_summary["news_inserted"])
+                summary["saved"] = int(write_summary["qualified_inserted"])
+                summary["duplicates"] = int(write_summary["duplicates"])
+                summary["write_failed"] = int(write_summary["write_failed"])
+
+                storage_labels = {
+                    "inserted": "已新增",
+                    "duplicate": "重复",
+                    "failed": "写入失败",
+                }
+                for detail_index, item in zip(
+                    case_detail_indexes, write_summary["items"], strict=False
+                ):
+                    detail = summary["details"][detail_index]
+                    detail["storage_status"] = storage_labels.get(
+                        item["storage_status"], "未知"
+                    )
+                    if item.get("reason"):
+                        detail["reason"] = "；".join(
+                            part
+                            for part in (detail["reason"], item["reason"])
+                            if part
+                        )
+
+                if summary["write_failed"]:
+                    summary["errors"].append(
+                        f"有 {summary['write_failed']} 条分析结果未写入数据库，请查看逐篇明细"
+                    )
+            except Exception as exc:
+                summary["write_failed"] = len(summary["cases"])
+                summary["errors"].append(
+                    f"入库失败：{type(exc).__name__}: {exc}"
+                )
+                for detail_index in case_detail_indexes:
+                    summary["details"][detail_index]["storage_status"] = "写入失败"
+                logger.error("入库异常: %s", type(exc).__name__)
         return summary
     finally:
         summary["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if summary["errors"] and summary["processed"] == 0:
+        if summary["errors"] and (
+            summary["processed"] == 0 or summary["analyzed"] == 0
+        ):
             summary["status"] = "failed"
-        elif summary["errors"]:
+        elif summary["errors"] or summary["write_failed"]:
             summary["status"] = "partial"
         else:
             summary["status"] = "success"
@@ -414,9 +571,18 @@ def run_pipeline(
             summary["run_id"] = record_task_run(summary)
         except Exception as exc:
             logger.error("写入任务日志失败: %s", exc, exc_info=True)
+        progress_message = {
+            "success": "任务完成",
+            "partial": "任务部分完成，请查看错误和逐篇明细",
+            "failed": "任务失败，请查看错误详情",
+        }[summary["status"]]
+        _notify_progress(progress_callback, progress_message, 1.0)
         logger.info(
-            "=== 流水线完成 === processed=%d saved=%d skipped=%d errors=%d",
+            "=== 流水线完成 === processed=%d analyzed=%d news_saved=%d "
+            "qualified_saved=%d skipped=%d errors=%d",
             summary["processed"],
+            summary["analyzed"],
+            summary["news_saved"],
             summary["saved"],
             summary["skipped"],
             len(summary["errors"]),

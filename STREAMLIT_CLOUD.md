@@ -81,7 +81,7 @@ git push -u origin main
 
 ```toml
 GEMINI_API_KEY = "你自己的_Gemini_API_Key"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-flash-latest"
 ADMIN_PASSWORD = "你自己设置的强口令"
 DEPLOYMENT_MODE = "cloud_demo"
 DATABASE_PATH = "data/industry_news.db"

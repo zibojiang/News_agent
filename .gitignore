@@ -11,6 +11,8 @@ data/
 # Streamlit（配置可提交，真实 Secrets 永不提交）
 .streamlit/secrets.toml
 .env
+.env.*
+!.env.example
 
 # IDE
 .idea/

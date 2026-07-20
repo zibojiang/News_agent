@@ -355,6 +355,16 @@ def _json_string(value: Any) -> str:
     return json.dumps([str(value)], ensure_ascii=False)
 
 
+def _case_is_qualified(case: dict[str, Any], min_score: int) -> bool:
+    """判断分析结果是否满足量化案例入库条件。"""
+    score = max(0, min(100, int(case.get("relevance_score", 0))))
+    return bool(
+        score >= min_score
+        and case.get("bullet_points")
+        and case.get("evidence_quotes")
+    )
+
+
 def append_case(
     case: dict[str, Any],
     db_path: str | None = None,
@@ -375,11 +385,7 @@ def append_case(
     score = max(0, min(100, int(case.get("relevance_score", 0))))
     topic_id = str(case.get("topic_id") or "CUSTOM")
     content_hash = str(case.get("content_hash", "")).strip()
-    is_qualified = int(
-        score >= min_score
-        and bool(case.get("bullet_points"))
-        and bool(case.get("evidence_quotes"))
-    )
+    is_qualified = int(_case_is_qualified(case, min_score))
     review_status = str(
         case.get("review_status") or ("待审核" if is_qualified else "低相关")
     )
@@ -441,17 +447,66 @@ def append_cases_batch(
     min_score: int = 70,
 ) -> int:
     """批量写入分析结果，返回新增的合格案例数。"""
-    qualified_saved = 0
+    result = append_cases_batch_with_summary(
+        cases, db_path=db_path, min_score=min_score
+    )
+    return int(result["qualified_inserted"])
+
+
+def append_cases_batch_with_summary(
+    cases: list[dict[str, Any]],
+    db_path: str | None = None,
+    min_score: int = 70,
+) -> dict[str, Any]:
+    """批量写入并区分新增新闻、达标案例、重复和写入失败。"""
+    result: dict[str, Any] = {
+        "news_inserted": 0,
+        "qualified_inserted": 0,
+        "duplicates": 0,
+        "write_failed": 0,
+        "items": [],
+    }
+
     for case in cases:
-        inserted = append_case(case, db_path=db_path, min_score=min_score)
-        if (
-            inserted
-            and int(case.get("relevance_score", 0)) >= min_score
-            and bool(case.get("bullet_points"))
-            and bool(case.get("evidence_quotes"))
-        ):
-            qualified_saved += 1
-    return qualified_saved
+        url = str(case.get("url", "")).strip()
+        topic_id = str(case.get("topic_id") or "CUSTOM")
+        content_hash = str(case.get("content_hash", "")).strip()
+        item = {
+            "title": str(case.get("title", "")),
+            "url": url,
+            "storage_status": "failed",
+            "reason": "",
+        }
+
+        try:
+            if not url:
+                result["write_failed"] += 1
+                item["reason"] = "缺少原文链接"
+            elif url_exists(
+                url,
+                db_path=db_path,
+                topic_id=topic_id,
+                content_hash=content_hash,
+            ):
+                result["duplicates"] += 1
+                item["storage_status"] = "duplicate"
+                item["reason"] = "同一主题下已存在相同链接或正文"
+            elif append_case(case, db_path=db_path, min_score=min_score):
+                result["news_inserted"] += 1
+                item["storage_status"] = "inserted"
+                if _case_is_qualified(case, min_score):
+                    result["qualified_inserted"] += 1
+            else:
+                result["write_failed"] += 1
+                item["reason"] = "数据库未接受该记录，请查看运行日志"
+        except Exception as exc:
+            result["write_failed"] += 1
+            item["reason"] = f"数据库写入异常：{type(exc).__name__}"
+            logger.error("批量写入单条新闻失败: %s", exc, exc_info=True)
+
+        result["items"].append(item)
+
+    return result
 
 
 def update_case_review_status(
