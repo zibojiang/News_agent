@@ -1,8 +1,8 @@
 """
 agent.py — Industry News Agent 核心逻辑
 
-使用 Google 官方 google-genai SDK 调用 Gemini 大模型，
-通过 Structured Outputs（response_schema）强制返回规整 JSON，
+支持 OpenAI 与 Google Gemini 两种模型提供方，
+通过 Structured Outputs 强制返回规整 JSON，
 从新闻正文中提炼带量化数据的商业案例。
 """
 
@@ -19,6 +19,7 @@ from typing import Any, Callable
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from openai import OpenAI
 from pydantic import BaseModel, Field, ValidationError
 
 from database import append_cases_batch_with_summary, record_task_run
@@ -29,8 +30,10 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Gemini 模型名称（可通过环境变量覆盖）
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+# AI 提供方与模型名称（均可通过环境变量覆盖）
+DEFAULT_AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
+DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna").strip()
+DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
 
 # API 调用重试配置
 MAX_RETRIES = 3
@@ -44,7 +47,7 @@ class NewsCaseSchema(BaseModel):
     """
     新闻商业案例结构化输出 Schema。
 
-    Gemini 将严格按照此 Pydantic 模型返回 JSON，
+    AI 模型将严格按照此 Pydantic 模型返回 JSON，
     确保字段类型与业务语义一致。
     """
 
@@ -73,7 +76,21 @@ class NewsCaseSchema(BaseModel):
 
 
 class ArticleAnalysisError(RuntimeError):
-    """单篇新闻经过重试后仍无法完成 Gemini 分析。"""
+    """单篇新闻经过重试后仍无法完成 AI 分析。"""
+
+
+def _classify_openai_error(exc: Exception, model_name: str) -> str:
+    """将 OpenAI SDK 异常转换为不包含密钥的用户可读信息。"""
+    message = str(exc).lower()
+    if any(key in message for key in ("429", "quota", "rate", "insufficient_quota")):
+        return "OpenAI 配额不足或请求频率受限（429）"
+    if any(key in message for key in ("401", "403", "api key", "unauthorized")):
+        return "OpenAI API Key 无效、已失效或无模型访问权限"
+    if "not found" in message or "404" in message:
+        return f"OpenAI 模型不可用：{model_name}"
+    if any(key in message for key in ("timeout", "timed out")):
+        return "OpenAI 请求超时"
+    return f"OpenAI API 调用失败（{type(exc).__name__}）"
 
 
 def _classify_gemini_error(exc: Exception, model_name: str) -> str:
@@ -162,6 +179,16 @@ def _get_gemini_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+def _get_openai_client() -> OpenAI:
+    """初始化 OpenAI 客户端，不在日志中暴露密钥。"""
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key or api_key == "your_openai_api_key_here":
+        raise ValueError(
+            "未配置有效的 OPENAI_API_KEY，请在 .env 或 Streamlit Secrets 中设置"
+        )
+    return OpenAI(api_key=api_key)
+
+
 def _build_user_prompt(
     article_title: str,
     article_url: str,
@@ -169,7 +196,7 @@ def _build_user_prompt(
     industry_keyword: str,
     topic: dict[str, Any] | None = None,
 ) -> str:
-    """组装发送给 Gemini 的用户侧 Prompt。"""
+    """组装发送给 AI 模型的用户侧 Prompt。"""
     topic = topic or {}
     return f"""【目标行业】{industry_keyword}
 
@@ -196,6 +223,118 @@ def _keep_verifiable_evidence(quotes: list[str], article_text: str) -> list[str]
         for quote in quotes
         if quote.strip() and re.sub(r"\s+", "", quote.strip()) in normalized_article
     ]
+
+
+def _prepare_analysis_prompts(
+    article_title: str,
+    article_url: str,
+    article_text: str,
+    industry_keyword: str,
+    topic: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """生成两种模型提供方共用的 system/user prompts。"""
+    topic = topic or {}
+    system_prompt = ANALYST_SYSTEM_PROMPT.format(
+        industry_keyword=industry_keyword,
+        topic_id=topic.get("topic_id", "CUSTOM"),
+        topic_name=topic.get("topic_name", "自定义行业研究"),
+    )
+    user_prompt = _build_user_prompt(
+        article_title, article_url, article_text, industry_keyword, topic
+    )
+    return system_prompt, user_prompt
+
+
+def _normalize_analysis_result(
+    parsed: NewsCaseSchema,
+    article_title: str,
+    article_url: str,
+    article_text: str,
+) -> NewsCaseSchema:
+    """锁定来源字段，并移除正文中无法验证的证据句。"""
+    parsed.title = article_title
+    parsed.url = article_url
+    parsed.evidence_quotes = _keep_verifiable_evidence(
+        parsed.evidence_quotes, article_text
+    )
+    return parsed
+
+
+def analyze_article_with_openai(
+    article_title: str,
+    article_url: str,
+    article_text: str,
+    industry_keyword: str,
+    topic: dict[str, Any] | None = None,
+    model: str | None = None,
+) -> NewsCaseSchema:
+    """使用 OpenAI Responses API 对单篇文章做结构化分析。"""
+    if not article_text.strip():
+        raise ArticleAnalysisError("新闻正文为空")
+
+    client = _get_openai_client()
+    model_name = model or DEFAULT_OPENAI_MODEL
+    system_prompt, user_prompt = _prepare_analysis_prompts(
+        article_title,
+        article_url,
+        article_text,
+        industry_keyword,
+        topic,
+    )
+
+    last_error = "OpenAI 未返回有效结果"
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.info(
+                "OpenAI 分析中 (attempt %d/%d): %s",
+                attempt,
+                MAX_RETRIES,
+                article_title[:50],
+            )
+            response = client.responses.parse(
+                model=model_name,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                text_format=NewsCaseSchema,
+            )
+            parsed = response.output_parsed
+            if parsed is None:
+                last_error = "OpenAI 返回空响应或拒绝处理该内容"
+                logger.warning(last_error)
+                continue
+
+            parsed = _normalize_analysis_result(
+                parsed, article_title, article_url, article_text
+            )
+            logger.info(
+                "分析完成: score=%d, bullets=%d — %s",
+                parsed.relevance_score,
+                len(parsed.bullet_points),
+                article_title[:40],
+            )
+            return parsed
+        except ValidationError:
+            last_error = "OpenAI 结构化输出不符合字段要求"
+            logger.error(last_error)
+        except Exception as exc:
+            error_msg = str(exc).lower()
+            last_error = _classify_openai_error(exc, model_name)
+            is_rate_limit = any(
+                key in error_msg for key in ("429", "rate", "quota", "insufficient_quota")
+            )
+            delay = (
+                RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                if is_rate_limit
+                else RETRY_BASE_DELAY
+            )
+            logger.warning("%s (attempt %d/%d)", last_error, attempt, MAX_RETRIES)
+            if attempt < MAX_RETRIES:
+                time.sleep(delay)
+
+    logger.error("OpenAI 分析最终失败: %s — %s", article_title, last_error)
+    raise ArticleAnalysisError(last_error)
 
 
 def analyze_article_with_gemini(
@@ -229,16 +368,13 @@ def analyze_article_with_gemini(
         raise ArticleAnalysisError("新闻正文为空")
 
     client = _get_gemini_client()
-    model_name = model or DEFAULT_MODEL
-
-    topic = topic or {}
-    system_prompt = ANALYST_SYSTEM_PROMPT.format(
-        industry_keyword=industry_keyword,
-        topic_id=topic.get("topic_id", "CUSTOM"),
-        topic_name=topic.get("topic_name", "自定义行业研究"),
-    )
-    user_prompt = _build_user_prompt(
-        article_title, article_url, article_text, industry_keyword, topic
+    model_name = model or DEFAULT_GEMINI_MODEL
+    system_prompt, user_prompt = _prepare_analysis_prompts(
+        article_title,
+        article_url,
+        article_text,
+        industry_keyword,
+        topic,
     )
 
     last_error = "Gemini 未返回有效结果"
@@ -282,10 +418,8 @@ def analyze_article_with_gemini(
             parsed = NewsCaseSchema.model_validate_json(raw_text)
 
             # 确保 title/url 与输入一致（防止模型篡改）
-            parsed.title = article_title
-            parsed.url = article_url
-            parsed.evidence_quotes = _keep_verifiable_evidence(
-                parsed.evidence_quotes, article_text
+            parsed = _normalize_analysis_result(
+                parsed, article_title, article_url, article_text
             )
 
             logger.info(
@@ -304,10 +438,8 @@ def analyze_article_with_gemini(
                 if raw_text:
                     data = json.loads(raw_text)
                     parsed = NewsCaseSchema.model_validate(data)
-                    parsed.title = article_title
-                    parsed.url = article_url
-                    parsed.evidence_quotes = _keep_verifiable_evidence(
-                        parsed.evidence_quotes, article_text
+                    parsed = _normalize_analysis_result(
+                        parsed, article_title, article_url, article_text
                     )
                     return parsed
             except Exception:
@@ -333,6 +465,35 @@ def analyze_article_with_gemini(
 
     logger.error("Gemini 分析最终失败: %s — %s", article_title, last_error)
     raise ArticleAnalysisError(last_error)
+
+
+def analyze_article(
+    article_title: str,
+    article_url: str,
+    article_text: str,
+    industry_keyword: str,
+    topic: dict[str, Any] | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> NewsCaseSchema:
+    """按 AI_PROVIDER 将单篇分析路由到 OpenAI 或 Gemini。"""
+    provider_name = (provider or DEFAULT_AI_PROVIDER).strip().lower()
+    analyzers = {
+        "openai": analyze_article_with_openai,
+        "gemini": analyze_article_with_gemini,
+    }
+    if provider_name not in analyzers:
+        raise ValueError(
+            f"不支持的 AI_PROVIDER：{provider_name}，可选值为 openai 或 gemini"
+        )
+    return analyzers[provider_name](
+        article_title=article_title,
+        article_url=article_url,
+        article_text=article_text,
+        industry_keyword=industry_keyword,
+        topic=topic,
+        model=model,
+    )
 
 
 def run_pipeline(
@@ -424,7 +585,7 @@ def run_pipeline(
             )
 
             try:
-                result = analyze_article_with_gemini(
+                result = analyze_article(
                     article_title=article["title"],
                     article_url=article["url"],
                     article_text=article["content"],
@@ -463,7 +624,7 @@ def run_pipeline(
                 continue
 
             if result is None:
-                reason = "Gemini 未返回可用分析结果"
+                reason = "AI 模型未返回可用分析结果"
                 summary["analysis_failed"] += 1
                 summary["skipped"] += 1
                 summary["errors"].append(

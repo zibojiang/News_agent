@@ -23,7 +23,12 @@ from access_control import (
     local_admin_without_password,
     verify_admin_password,
 )
-from agent import run_pipeline
+from agent import (
+    DEFAULT_AI_PROVIDER,
+    DEFAULT_GEMINI_MODEL,
+    DEFAULT_OPENAI_MODEL,
+    run_pipeline,
+)
 from database import (
     JSON_COLUMNS,
     format_json_list_for_display,
@@ -598,9 +603,14 @@ with tasks_tab:
         st.dataframe(display_runs, width="stretch", hide_index=True)
 
 st.markdown("---")
+active_model = (
+    DEFAULT_OPENAI_MODEL
+    if DEFAULT_AI_PROVIDER == "openai"
+    else DEFAULT_GEMINI_MODEL
+)
 st.caption(
     f"数据库：`{os.getenv('DATABASE_PATH', 'data/industry_news.db')}` · "
-    f"Gemini：`{os.getenv('GEMINI_MODEL', 'gemini-flash-latest')}` · "
+    f"AI：`{DEFAULT_AI_PROVIDER}` / `{active_model}` · "
     f"模式：`{'cloud_demo' if cloud_demo else 'local'}` · "
     "原始主题 Excel 不会被程序修改"
 )

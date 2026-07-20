@@ -1,6 +1,7 @@
 # Industry_News_Agent 项目依赖
 streamlit>=1.59.0,<2.0.0
 google-genai>=1.0.0
+openai>=1.66.0,<3.0.0
 pandas>=2.2.0
 openpyxl>=3.1.0
 apscheduler>=3.10.0,<4.0.0

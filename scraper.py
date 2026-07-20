@@ -294,7 +294,7 @@ def extract_article_text(url: str, max_chars: int = 12000) -> str:
 
     Args:
         url: 文章网页链接
-        max_chars: 返回文本最大字符数（控制 Gemini Token 消耗）
+        max_chars: 返回文本最大字符数（控制 AI Token 消耗）
 
     Returns:
         清洗后的正文文本；抓取或解析失败时返回空字符串

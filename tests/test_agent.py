@@ -7,11 +7,45 @@ from agent import (
     ArticleAnalysisError,
     NewsCaseSchema,
     _keep_verifiable_evidence,
+    analyze_article,
     run_pipeline,
 )
 
 
 class AgentEvidenceTestCase(unittest.TestCase):
+    def test_routes_analysis_to_openai(self) -> None:
+        expected = NewsCaseSchema(
+            title="测试新闻",
+            url="https://example.com/news/1",
+            summary="测试摘要",
+            bullet_points=[],
+            evidence_quotes=[],
+            involved_companies=[],
+            regions=[],
+            metric_tags=[],
+            relevance_score=50,
+        )
+        with patch("agent.analyze_article_with_openai", return_value=expected) as call:
+            result = analyze_article(
+                "测试新闻",
+                "https://example.com/news/1",
+                "测试正文",
+                "酒店",
+                provider="openai",
+            )
+        self.assertIs(result, expected)
+        call.assert_called_once()
+
+    def test_rejects_unknown_provider(self) -> None:
+        with self.assertRaisesRegex(ValueError, "AI_PROVIDER"):
+            analyze_article(
+                "测试新闻",
+                "https://example.com/news/1",
+                "测试正文",
+                "酒店",
+                provider="unknown",
+            )
+
     def test_keeps_only_quotes_present_in_article(self) -> None:
         article = "万豪 2025 年营收达 255 亿美元，同比增长 8%。"
         quotes = [
@@ -61,7 +95,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
 
         with (
             patch("agent.fetch_and_extract_batch", return_value=[article]),
-            patch("agent.analyze_article_with_gemini", return_value=analysis),
+            patch("agent.analyze_article", return_value=analysis),
             patch(
                 "agent.append_cases_batch_with_summary",
                 return_value=write_summary,
@@ -87,8 +121,8 @@ class AgentEvidenceTestCase(unittest.TestCase):
         with (
             patch("agent.fetch_and_extract_batch", return_value=[article]),
             patch(
-                "agent.analyze_article_with_gemini",
-                side_effect=ArticleAnalysisError("Gemini 配额不足（429）"),
+                "agent.analyze_article",
+                side_effect=ArticleAnalysisError("OpenAI 配额不足（429）"),
             ),
             patch("agent.append_cases_batch_with_summary") as append_batch,
             patch("agent.record_task_run", return_value=1),
@@ -99,7 +133,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
         self.assertEqual(summary["analyzed"], 0)
         self.assertEqual(summary["analysis_failed"], 1)
         self.assertEqual(summary["status"], "failed")
-        self.assertIn("Gemini 配额不足", summary["errors"][0])
+        self.assertIn("OpenAI 配额不足", summary["errors"][0])
 
 
 if __name__ == "__main__":

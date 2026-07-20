@@ -12,7 +12,7 @@ https://你的项目名.streamlit.app
 
 - 公开访客：查看仪表盘、新闻池、案例库、原文链接和导出结果。
 - 管理员：输入 `ADMIN_PASSWORD` 后，可手动抓取、审核案例和修改研究主题。
-- Cloud 未配置管理员口令时，管理操作会默认锁定，不会开放 Gemini 调用。
+- Cloud 未配置管理员口令时，管理操作会默认锁定，不会开放 AI API 调用。
 
 ## 1. 创建 GitHub 仓库
 
@@ -80,8 +80,9 @@ git push -u origin main
 在 Advanced settings 的 **Secrets** 输入框中粘贴：
 
 ```toml
-GEMINI_API_KEY = "你自己的_Gemini_API_Key"
-GEMINI_MODEL = "gemini-flash-latest"
+AI_PROVIDER = "openai"
+OPENAI_API_KEY = "你自己的_OpenAI_API_Key"
+OPENAI_MODEL = "gpt-5.6-luna"
 ADMIN_PASSWORD = "你自己设置的强口令"
 DEPLOYMENT_MODE = "cloud_demo"
 DATABASE_PATH = "data/industry_news.db"
@@ -141,7 +142,9 @@ Community Cloud 会检测 GitHub 变更并重新部署。
 
 ### 页面能打开，但抓取提示 API Key 错误
 
-进入 Streamlit App settings，检查 Secrets 中的 `GEMINI_API_KEY`。
+进入 Streamlit App settings，检查 Secrets 中的 `AI_PROVIDER`、
+`OPENAI_API_KEY` 和 `OPENAI_MODEL`。如果选择 Gemini，则检查对应的
+`GEMINI_API_KEY` 和 `GEMINI_MODEL`。
 
 ### 页面只读，无法抓取
 
