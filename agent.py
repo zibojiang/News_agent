@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # AI 提供方与模型名称（均可通过环境变量覆盖）
 DEFAULT_AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
-DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna").strip()
+DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
 
 # API 调用重试配置
