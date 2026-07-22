@@ -27,7 +27,6 @@ from agent import (
     DEFAULT_AI_PROVIDER,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_OPENAI_MODEL,
-    DEFAULT_DEEPSEEK_MODEL,
     run_pipeline,
 )
 from database import (
@@ -604,13 +603,7 @@ with tasks_tab:
         st.dataframe(display_runs, width="stretch", hide_index=True)
 
 st.markdown("---")
-active_model = (
-    DEFAULT_OPENAI_MODEL
-    if DEFAULT_AI_PROVIDER == "openai"
-    else DEFAULT_DEEPSEEK_MODEL
-    if DEFAULT_AI_PROVIDER == "deepseek"
-    else DEFAULT_GEMINI_MODEL
-)
+active_model = DEFAULT_GEMINI_MODEL if DEFAULT_AI_PROVIDER == "gemini" else DEFAULT_OPENAI_MODEL
 st.caption(
     f"数据库：`{os.getenv('DATABASE_PATH', 'data/industry_news.db')}` · "
     f"AI：`{DEFAULT_AI_PROVIDER}` / `{active_model}` · "

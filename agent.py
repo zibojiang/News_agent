@@ -34,7 +34,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
-DEFAULT_DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
 DEFAULT_OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "").strip()
 
 # API 调用重试配置
