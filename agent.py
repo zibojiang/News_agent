@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
 DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
+DEFAULT_DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
+DEFAULT_OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "").strip()
 
 # API 调用重试配置
 MAX_RETRIES = 3
@@ -186,7 +188,8 @@ def _get_openai_client() -> OpenAI:
         raise ValueError(
             "未配置有效的 OPENAI_API_KEY，请在 .env 或 Streamlit Secrets 中设置"
         )
-    return OpenAI(api_key=api_key)
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or None
+    return OpenAI(api_key=api_key, base_url=base_url)
 
 
 def _build_user_prompt(
@@ -480,11 +483,12 @@ def analyze_article(
     provider_name = (provider or DEFAULT_AI_PROVIDER).strip().lower()
     analyzers = {
         "openai": analyze_article_with_openai,
+        "deepseek": analyze_article_with_openai,
         "gemini": analyze_article_with_gemini,
     }
     if provider_name not in analyzers:
         raise ValueError(
-            f"不支持的 AI_PROVIDER：{provider_name}，可选值为 openai 或 gemini"
+            f"不支持的 AI_PROVIDER：{provider_name}，可选值为 openai、gemini 或 deepseek"
         )
     return analyzers[provider_name](
         article_title=article_title,

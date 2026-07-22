@@ -27,6 +27,7 @@ from agent import (
     DEFAULT_AI_PROVIDER,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_OPENAI_MODEL,
+    DEFAULT_DEEPSEEK_MODEL,
     run_pipeline,
 )
 from database import (
@@ -606,6 +607,8 @@ st.markdown("---")
 active_model = (
     DEFAULT_OPENAI_MODEL
     if DEFAULT_AI_PROVIDER == "openai"
+    else DEFAULT_DEEPSEEK_MODEL
+    if DEFAULT_AI_PROVIDER == "deepseek"
     else DEFAULT_GEMINI_MODEL
 )
 st.caption(
