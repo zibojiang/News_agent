@@ -340,6 +340,92 @@ def analyze_article_with_openai(
     raise ArticleAnalysisError(last_error)
 
 
+
+
+def analyze_article_with_chat_completions(
+    article_title: str,
+    article_url: str,
+    article_text: str,
+    industry_keyword: str,
+    topic: dict[str, Any] | None = None,
+    model: str | None = None,
+) -> NewsCaseSchema:
+    """使用 OpenAI 兼容的 Chat Completions API 对单篇文章做结构化分析。
+
+    适用于 DeepSeek、硅基流动等仅支持 Chat Completions 的第三方提供方。
+    通过 response_format=json_object 强制返回 JSON，手动解析后
+    经 Pydantic 校验确保字段完整。
+    """
+    if not article_text.strip():
+        raise ArticleAnalysisError("新闻正文为空")
+
+    client = _get_openai_client()
+    model_name = model or DEFAULT_OPENAI_MODEL
+    system_prompt, user_prompt = _prepare_analysis_prompts(
+        article_title,
+        article_url,
+        article_text,
+        industry_keyword,
+        topic,
+    )
+    # JSON mode 硬性要求：system prompt 中必须包含 "json" 字样
+    system_prompt = system_prompt + "\nRespond with a valid JSON object."
+
+    last_error = "Chat Completions API 未返回有效结果"
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            logger.info(
+                "Chat Completions 分析中 (attempt %d/%d): %s",
+                attempt,
+                MAX_RETRIES,
+                article_title[:50],
+            )
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content
+            if not content:
+                last_error = "Chat Completions API 返回空响应"
+                logger.warning(last_error)
+                continue
+
+            parsed_data = json.loads(content)
+            parsed = NewsCaseSchema(**parsed_data)
+            parsed = _normalize_analysis_result(
+                parsed, article_title, article_url, article_text
+            )
+            logger.info(
+                "分析完成: score=%d, bullets=%d — %s",
+                parsed.relevance_score,
+                len(parsed.bullet_points),
+                article_title[:40],
+            )
+            return parsed
+        except (json.JSONDecodeError, ValidationError):
+            last_error = "Chat Completions API 返回 JSON 格式不符合 Schema 要求"
+            logger.error(last_error)
+        except Exception as exc:
+            error_msg = str(exc).lower()
+            last_error = _classify_openai_error(exc, model_name)
+            is_rate_limit = any(
+                key in error_msg for key in ("429", "rate", "quota", "insufficient_quota")
+            )
+            delay = (
+                RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                if is_rate_limit
+                else RETRY_BASE_DELAY
+            )
+            logger.warning("%s (attempt %d/%d)", last_error, attempt, MAX_RETRIES)
+            if attempt < MAX_RETRIES:
+                time.sleep(delay)
+
+    logger.error("Chat Completions 分析最终失败: %s — %s", article_title, last_error)
+    raise ArticleAnalysisError(last_error)
 def analyze_article_with_gemini(
     article_title: str,
     article_url: str,
@@ -483,7 +569,7 @@ def analyze_article(
     provider_name = (provider or DEFAULT_AI_PROVIDER).strip().lower()
     analyzers = {
         "openai": analyze_article_with_openai,
-        "deepseek": analyze_article_with_openai,
+        "deepseek": analyze_article_with_chat_completions,
         "gemini": analyze_article_with_gemini,
     }
     if provider_name not in analyzers:
