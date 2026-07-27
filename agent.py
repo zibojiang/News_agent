@@ -703,10 +703,10 @@ def run_pipeline(
                     title=article["title"],
                     url=article["url"],
                     content=article["content"],
-                    source=article["source"],
-                    published_at=article["published_at"],
+                    source=str(article.get("source", "")),
+                    published_at=str(article.get("published_at", "")),
                     keyword=industry_keyword,
-                    content_hash=article["content_hash"],
+                    content_hash=str(article.get("content_hash", "")),
                 )
         except Exception as exc:
             error = f"抓取失败：{type(exc).__name__}: {exc}"

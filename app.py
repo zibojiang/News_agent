@@ -298,8 +298,13 @@ def _render_run_summary(summary: dict[str, Any]) -> None:
             },
         )
 
+cloud_demo = is_cloud_demo()
 
 with st.sidebar:
+    is_admin = _render_admin_access()
+    if not is_admin:
+        st.caption("当前为公开只读模式；可查看数据和原文链接。")
+    st.divider()
     st.markdown("### \U0001f50d 新闻搜索")
     search_keyword = st.text_input(
         "搜索关键词",
@@ -463,18 +468,6 @@ with news_tab:
         if status_filter != "全部":
             filtered_news = filtered_news[filtered_news["review_status"] == status_filter]
         filtered_news = filtered_news[filtered_news["relevance_score"] >= score_filter]
-        news_display = _display_cases(filtered_news)
-        news_columns = [
-            "ID", "发布时间", "新闻标题", "来源", "研究主题", "新闻摘要",
-            "相关性", "入库判定", "审核状态", "原文链接",
-        ]
-        st.dataframe(
-            news_display[[col for col in news_columns if col in news_display.columns]],
-            width="stretch",
-            hide_index=True,
-            column_config=_table_config(),
-        )
-        # 排序
         news_sort_map = {
             "最新发布": ("published_at", False),
             "最早发布": ("published_at", True),
@@ -486,6 +479,17 @@ with news_tab:
             filtered_news = filtered_news.sort_values(
                 sort_col, ascending=sort_asc, na_position="last"
             )
+        news_display = _display_cases(filtered_news)
+        news_columns = [
+            "ID", "发布时间", "新闻标题", "来源", "研究主题", "新闻摘要",
+            "相关性", "入库判定", "审核状态", "原文链接",
+        ]
+        st.dataframe(
+            news_display[[col for col in news_columns if col in news_display.columns]],
+            width="stretch",
+            hide_index=True,
+            column_config=_table_config(),
+        )
         st.caption(f"共 {len(filtered_news)} 条新闻")
     else:
         st.info("新闻池暂无数据。")
