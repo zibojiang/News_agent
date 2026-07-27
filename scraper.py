@@ -14,6 +14,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -369,46 +370,58 @@ def extract_article_text(url: str, max_chars: int = 12000) -> str:
 def fetch_and_extract_batch(
     query: str,
     max_articles: int = MAX_ARTICLES_PER_RUN,
-    delay_seconds: float = 1.0,
+    max_workers: int = 6,
+    min_content_length: int = 200,
 ) -> list[dict[str, Any]]:
     """
-    组合函数：抓取新闻列表并逐篇提取正文。
+    抓取新闻列表并并行提取正文，含质量预筛。
 
     Args:
         query: 行业关键词
-        max_articles: 最大文章数
-        delay_seconds: 每篇文章之间的请求间隔（礼貌爬取）
+        max_articles: 最大返回文章数
+        max_workers: 并行提取的最大线程数
+        min_content_length: 最低正文长度，低于此值直接跳过
 
     Returns:
         包含 title/url/source/published_at/content/content_hash 的字典列表
     """
-    news_list = fetch_latest_news(query, max_articles=max_articles)
+    # 多抓一些以备质量筛选
+    fetch_count = max(15, max_articles * 2)
+    news_list = fetch_latest_news(query, max_articles=fetch_count)
     results: list[dict[str, Any]] = []
 
-    for idx, item in enumerate(news_list):
+    def _extract_one(item: dict[str, Any]) -> dict[str, Any] | None:
         url = item["url"]
         content = extract_article_text(url)
-
         if not content:
             logger.warning("跳过无正文文章: %s", item.get("title"))
-            continue
+            return None
+        if len(content) < min_content_length:
+            logger.warning("跳过低质量文章（正文 %d 字）: %s",
+                           len(content), item.get("title")[:50])
+            return None
+        return {
+            "title": item["title"],
+            "url": url,
+            "source": item.get("source", ""),
+            "published_at": item.get("published_at", ""),
+            "content": content,
+            "content_hash": hashlib.sha256(
+                _clean_text(content).encode("utf-8")
+            ).hexdigest(),
+        }
 
-        results.append(
-            {
-                "title": item["title"],
-                "url": url,
-                "source": item.get("source", ""),
-                "published_at": item.get("published_at", ""),
-                "content": content,
-                "content_hash": hashlib.sha256(
-                    _clean_text(content).encode("utf-8")
-                ).hexdigest(),
-            }
-        )
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_extract_one, item): item for item in news_list}
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                results.append(result)
+                if len(results) >= max_articles:
+                    for f in futures:
+                        f.cancel()
+                    break
 
-        # 最后一篇无需等待
-        if idx < len(news_list) - 1 and delay_seconds > 0:
-            time.sleep(delay_seconds)
-
-    logger.info("成功提取 %d/%d 篇文章正文", len(results), len(news_list))
+    logger.info("提取完成 %d/%d 篇有效正文",
+                len(results), len(news_list))
     return results

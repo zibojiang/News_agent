@@ -51,6 +51,7 @@ CASE_COLUMNS = [
     "metric_tags",
     "relevance_score",
     "is_qualified",
+    "quality_json",
     "review_status",
 ]
 
@@ -176,6 +177,7 @@ def initialize_database(db_path: str | None = None) -> str:
                 regions TEXT NOT NULL DEFAULT '[]',
                 metric_tags TEXT NOT NULL DEFAULT '[]',
                 relevance_score INTEGER NOT NULL DEFAULT 0,
+                quality_json TEXT NOT NULL DEFAULT '{}',
                 is_qualified INTEGER NOT NULL DEFAULT 0,
                 review_status TEXT NOT NULL DEFAULT '待审核',
                 created_at TEXT NOT NULL,
@@ -344,6 +346,8 @@ def url_exists(
 def _json_string(value: Any) -> str:
     if isinstance(value, list):
         return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
     if value in (None, ""):
         return "[]"
     if isinstance(value, str):
@@ -351,7 +355,7 @@ def _json_string(value: Any) -> str:
             parsed = json.loads(value)
             return json.dumps(parsed, ensure_ascii=False)
         except json.JSONDecodeError:
-            return json.dumps([value], ensure_ascii=False)
+            return json.dumps([value], ensure_ascii=False) if value.strip() else "{}"
     return json.dumps([str(value)], ensure_ascii=False)
 
 
@@ -406,6 +410,7 @@ def append_case(
         str(case.get("summary") or ""),
         _json_string(case.get("bullet_points")),
         _json_string(case.get("evidence_quotes")),
+        _json_string(case.get("quality_details") or {}),
         _json_string(case.get("involved_companies")),
         _json_string(case.get("regions")),
         _json_string(case.get("metric_tags")),
@@ -423,10 +428,10 @@ def append_case(
                 INSERT INTO news_cases (
                     discovered_at, published_at, title, url, source, content_hash,
                     topic_id, dimension, category, topic_name, industry_keyword,
-                    summary, bullet_points, evidence_quotes, involved_companies,
-                    regions, metric_tags, relevance_score, is_qualified,
-                    review_status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    summary, bullet_points, evidence_quotes, quality_json,
+                    involved_companies, regions, metric_tags,
+                    relevance_score, is_qualified, review_status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )

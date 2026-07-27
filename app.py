@@ -49,6 +49,49 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def _parse_quality_json(raw: Any) -> dict:
+    """从 DB 的 quality_json 字段解析质量评分字典。"""
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return {}
+    if isinstance(raw, str):
+        try:
+            import json as _json
+            result = _json.loads(raw)
+            if isinstance(result, list) and result:
+                result = result[0] if isinstance(result[0], dict) else {}
+            return result if isinstance(result, dict) else {}
+        except (_json.JSONDecodeError, TypeError):
+            return {}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+def _quality_label_badge(label: str) -> str:
+    """返回质量标签对应的 Emoji 标识。"""
+    mapping = {
+        "优秀": "🟢",
+        "良好": "🔵",
+        "一般": "🟡",
+        "偏低": "🟠",
+        "较低": "🔴",
+    }
+    return mapping.get(label, "⚪") + " " + label
+
+def _enrich_with_quality(df: pd.DataFrame) -> pd.DataFrame:
+    """从 quality_json 提取 quality_score 和 quality_label 到 DataFrame。"""
+    if df.empty or "quality_json" not in df.columns:
+        return df
+    df = df.copy()
+    scores = []
+    labels = []
+    for _, row in df.iterrows():
+        q = _parse_quality_json(row.get("quality_json"))
+        scores.append(int(q.get("adjusted_score", q.get("total_score", 0))))
+        labels.append(str(q.get("label", "")))
+    df["quality_score"] = scores
+    df["quality_label"] = labels
+    return df
+
 st.set_page_config(
     page_title="文旅行业情报 Agent",
     page_icon="📰",
@@ -114,6 +157,17 @@ def _display_cases(df: pd.DataFrame) -> pd.DataFrame:
                     value, numbered=(col in {"bullet_points", "evidence_quotes"})
                 )
             )
+    # 提取质量评分
+    if "quality_json" in display_df.columns:
+        quality_scores = []
+        quality_labels = []
+        for _, row in display_df.iterrows():
+            q = _parse_quality_json(row.get("quality_json"))
+            quality_scores.append(int(q.get("adjusted_score", q.get("total_score", 0))))
+            quality_labels.append(_quality_label_badge(str(q.get("label", ""))))
+        display_df["quality_score"] = quality_scores
+        display_df["quality_label"] = quality_labels
+
     display_df["is_qualified"] = display_df["is_qualified"].map(
         {1: "已达标", 0: "未达标"}
     )
@@ -139,6 +193,8 @@ def _display_cases(df: pd.DataFrame) -> pd.DataFrame:
             "relevance_score": "相关性",
             "is_qualified": "入库判定",
             "review_status": "审核状态",
+            "quality_score": "报道质量",
+            "quality_label": "质量评级",
         }
     )
 
@@ -150,6 +206,9 @@ def _table_config() -> dict[str, Any]:
         ),
         "相关性": st.column_config.ProgressColumn(
             "相关性", min_value=0, max_value=100, format="%d"
+        ),
+        "报道质量": st.column_config.ProgressColumn(
+            "报道质量", min_value=0, max_value=100, format="%d"
         ),
         "新闻摘要": st.column_config.TextColumn("新闻摘要", width="large"),
         "量化案例": st.column_config.TextColumn("量化案例", width="large"),
@@ -240,45 +299,31 @@ def _render_run_summary(summary: dict[str, Any]) -> None:
         )
 
 
-topics_df = load_topics(enabled_only=True)
-topic_records = topics_df.to_dict(orient="records")
-topic_options = {_topic_label(topic): topic for topic in topic_records}
-cloud_demo = is_cloud_demo()
-
 with st.sidebar:
-    is_admin = _render_admin_access()
-    if not is_admin:
-        st.caption("当前为公开只读模式；可查看数据和原文链接。")
-    st.divider()
-    st.markdown("### 🎯 手动研究")
-    selected_label = st.selectbox(
-        "研究主题", options=list(topic_options), disabled=not is_admin
-    )
-    selected_topic = topic_options[selected_label]
-
+    st.markdown("### \U0001f50d 新闻搜索")
     search_keyword = st.text_input(
-        "新闻搜索词",
-        value=str(selected_topic.get("search_keywords", "")),
-        help="可在单次任务中临时调整，不会改写主题配置。",
+        "搜索关键词",
+        placeholder="输入关键词，AI 自动搜索并归类到研究主题…",
+        disabled=not is_admin,
+    )
+    max_articles = st.slider(
+        "文章数量",
+        min_value=1,
+        max_value=20,
+        value=8,
+        step=1,
         disabled=not is_admin,
     )
     min_score = st.slider(
         "案例入库门槛",
         min_value=0,
         max_value=100,
-        value=int(selected_topic.get("min_score", 70)),
+        value=70,
         step=5,
         disabled=not is_admin,
     )
-    max_articles = st.number_input(
-        "最大文章数",
-        min_value=1,
-        max_value=30,
-        value=int(selected_topic.get("max_articles", 8)),
-        disabled=not is_admin,
-    )
     run_button = st.button(
-        "🚀 抓取并分析",
+        "\U0001f680 搜索并分析",
         type="primary",
         width="stretch",
         disabled=not is_admin,
@@ -287,11 +332,11 @@ with st.sidebar:
 
     st.divider()
     if cloud_demo:
-        st.markdown("### ☁️ Cloud 展示模式")
+        st.markdown("### \u2601\ufe0f Cloud 展示模式")
         st.info("网页可公开访问")
         st.caption("Community Cloud 不运行本地定时 worker。")
     else:
-        st.markdown("### ⏱️ 定时 worker")
+        st.markdown("### \u23f1\ufe0f 定时 worker")
         scheduler_health = get_scheduler_health()
         if scheduler_health["running"]:
             st.success("运行中")
@@ -327,13 +372,13 @@ if run_button:
         def update_progress(message: str, value: float) -> None:
             progress_bar.progress(value, text=message)
 
-        with st.spinner(f"正在处理「{selected_label}」，请稍候…"):
+        with st.spinner(f"正在处理搜索关键词「{search_keyword}」，请稍候…"):
             try:
                 run_summary = run_pipeline(
                     industry_keyword=search_keyword.strip(),
                     min_score=min_score,
                     max_articles=int(max_articles),
-                    topic=selected_topic,
+                    topic=None,  # 自动归类到研究主题
                     trigger_type="manual",
                     progress_callback=update_progress,
                 )
@@ -380,7 +425,8 @@ with dashboard_tab:
         with right:
             st.markdown("#### 最近发现")
             recent_cols = ["发现时间", "新闻标题", "研究主题", "相关性", "原文链接"]
-            recent_df = _display_cases(all_news.head(8))
+            all_news_enriched = _enrich_with_quality(all_news)
+            recent_df = _display_cases(all_news_enriched.head(8))
             st.dataframe(
                 recent_df[[col for col in recent_cols if col in recent_df.columns]],
                 width="stretch",
@@ -390,8 +436,13 @@ with dashboard_tab:
 
 with news_tab:
     st.markdown("#### 所有已分析新闻")
-    news_df = load_cases()
-    filter_cols = st.columns([2, 2, 1])
+    news_df = _enrich_with_quality(load_cases())
+    filter_cols = st.columns([1, 1, 1, 1])
+    news_sort = filter_cols[3].selectbox(
+        "排序方式",
+        ["最新发布", "最早发布", "质量最高", "质量最低"],
+        key="news_sort",
+    )
     topic_filter = filter_cols[0].selectbox(
         "主题筛选",
         ["全部"] + sorted(news_df["topic_name"].dropna().unique().tolist())
@@ -423,13 +474,25 @@ with news_tab:
             hide_index=True,
             column_config=_table_config(),
         )
+        # 排序
+        news_sort_map = {
+            "最新发布": ("published_at", False),
+            "最早发布": ("published_at", True),
+            "质量最高": ("quality_score", False),
+            "质量最低": ("quality_score", True),
+        }
+        sort_col, sort_asc = news_sort_map.get(news_sort, ("published_at", False))
+        if sort_col in filtered_news.columns:
+            filtered_news = filtered_news.sort_values(
+                sort_col, ascending=sort_asc, na_position="last"
+            )
         st.caption(f"共 {len(filtered_news)} 条新闻")
     else:
         st.info("新闻池暂无数据。")
 
 with cases_tab:
     st.markdown("#### 量化案例数据表")
-    cases_df = load_cases(qualified_only=True)
+    cases_df = _enrich_with_quality(load_cases(qualified_only=True))
     if cases_df.empty:
         st.info("暂无达到门槛且包含量化信息的案例。")
     else:

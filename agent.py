@@ -14,6 +14,7 @@ import os
 import re
 import time
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from dotenv import load_dotenv
@@ -22,7 +23,13 @@ from google.genai import types
 from openai import OpenAI
 from pydantic import BaseModel, Field, ValidationError
 
-from database import append_cases_batch_with_summary, record_task_run
+from database import append_cases_batch_with_summary, load_topics, record_task_run
+from quality_scorer import (
+    NEWS_QUALITY_RULE_VERSION,
+    QualitySummary,
+    enrich_with_ai_result,
+    score_article_pre_ai,
+)
 from scraper import fetch_and_extract_batch
 
 # 加载 .env 环境变量
@@ -585,6 +592,57 @@ def analyze_article(
     )
 
 
+def _classify_topic_posthoc(
+    result: NewsCaseSchema,
+    keyword: str,
+    topic_records: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """后置主题归类：根据 AI 提取的企业/地区/指标与 28 个主题进行关键词匹配。
+
+    返回最佳匹配的主题字典，若无明显匹配则返回 None。
+    """
+    if not topic_records:
+        return None
+
+    # 构建每篇文章的搜索文本（用于匹配）
+    article_texts: list[str] = [keyword, result.summary]
+    article_texts.extend(result.involved_companies)
+    article_texts.extend(result.regions)
+    article_texts.extend(result.metric_tags)
+    combined = " ".join(article_texts).lower()
+
+    best_topic: dict[str, Any] | None = None
+    best_score = 0
+
+    for topic in topic_records:
+        if str(topic.get("topic_id", "")) == "CUSTOM":
+            continue
+        score = 0
+        kw = str(topic.get("search_keywords", "")).lower()
+        name = str(topic.get("topic_name", "")).lower()
+        dim = str(topic.get("dimension", "")).lower()
+        cat = str(topic.get("category", "")).lower()
+
+        # 关键词匹配
+        for token in kw.split():
+            if len(token) >= 2 and token in combined:
+                score += 3
+        if len(name) >= 2 and name in combined:
+            score += 5
+        for token in dim.split():
+            if len(token) >= 2 and token in combined:
+                score += 2
+
+        if score > best_score:
+            best_score = score
+            best_topic = dict(topic)
+
+    # 最低匹配阈值
+    if best_score < 5:
+        return None
+    return best_topic
+
+
 def run_pipeline(
     industry_keyword: str,
     min_score: int = DEFAULT_MIN_SCORE,
@@ -638,6 +696,18 @@ def run_pipeline(
             articles = fetch_and_extract_batch(
                 industry_keyword, max_articles=max_articles
             )
+
+            # 预 AI 质量评分（纯算法，零成本）
+            for article in articles:
+                article["quality_pre"] = score_article_pre_ai(
+                    title=article["title"],
+                    url=article["url"],
+                    content=article["content"],
+                    source=article["source"],
+                    published_at=article["published_at"],
+                    keyword=industry_keyword,
+                    content_hash=article["content_hash"],
+                )
         except Exception as exc:
             error = f"抓取失败：{type(exc).__name__}: {exc}"
             logger.error("抓取阶段异常: %s", type(exc).__name__)
@@ -726,6 +796,47 @@ def run_pipeline(
             summary["analyzed"] += 1
             detail["score"] = result.relevance_score
             detail["analysis_status"] = "成功"
+
+            # 后置主题归类（无预设主题时）
+            resolved_topic = topic
+            if not topic or topic.get("topic_id") == "CUSTOM":
+                topics_df = load_topics(enabled_only=True)
+                topic_records = topics_df.to_dict(orient="records")
+                matched = _classify_topic_posthoc(
+                    result, industry_keyword, topic_records
+                )
+                if matched:
+                    resolved_topic = matched
+                    detail["auto_topic"] = matched.get("topic_id", "")
+                    logger.info(
+                        "自动归类: %s → %s",
+                        result.title[:30],
+                        matched.get("topic_id"),
+                    )
+
+            # AI 后质量增强
+            pre_score = article.get("quality_pre")
+            ai_data = {
+                "title": result.title,
+                "content": article.get("content", ""),
+                "headlineBodyConsistency": getattr(result, "headline_body_consistency", None),
+                "originalReportingSignals": getattr(result, "original_reporting_signals", []),
+                "namedSourceCount": getattr(result, "named_source_count", 0),
+                "hasBackgroundContext": getattr(result, "has_background_context", False),
+                "primaryDocumentCount": getattr(result, "primary_document_count", 0),
+                "containsCounterpartyResponse": getattr(result, "contains_counterparty_response", False),
+                "containsDirectQuotes": getattr(result, "contains_direct_quotes", False),
+                "articleType": getattr(result, "article_type", ""),
+                "unsupportedClaims": getattr(result, "unsupported_claims", []),
+                "ai_confidence": getattr(result, "ai_confidence", None),
+            }
+            if isinstance(pre_score, QualitySummary):
+                quality = enrich_with_ai_result(pre_score, ai_data)
+            else:
+                quality = QualitySummary()
+            detail["quality_score"] = quality.adjusted_score
+            detail["quality_label"] = quality.label
+
             case_dict = {
                 "discovered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "published_at": article.get("published_at", ""),
@@ -741,10 +852,25 @@ def run_pipeline(
                 "metric_tags": result.metric_tags,
                 "relevance_score": result.relevance_score,
                 "industry_keyword": industry_keyword,
-                "topic_id": summary["topic_id"],
-                "topic_name": summary["topic_name"],
-                "dimension": topic.get("dimension", "自定义"),
-                "category": topic.get("category", "自定义"),
+                "topic_id": resolved_topic.get("topic_id", summary["topic_id"]),
+                "topic_name": resolved_topic.get("topic_name", summary["topic_name"]),
+                "dimension": resolved_topic.get("dimension", topic.get("dimension", "自定义")),
+                "category": resolved_topic.get("category", topic.get("category", "自定义")),
+                "quality_score": quality.adjusted_score,
+                "quality_details": {
+                    "total_score": quality.total_score,
+                    "adjusted_score": quality.adjusted_score,
+                    "dimension_scores": quality.dimension_scores,
+                    "dimension_reasons": quality.dimension_reasons,
+                    "penalties": [
+                        {"reason": p.reason, "deduction": p.deduction}
+                        for p in quality.penalties
+                    ],
+                    "label": quality.label,
+                    "label_description": quality.label_description,
+                    "rule_version": quality.rule_version,
+                    "ai_confidence": quality.ai_confidence,
+                },
             }
             summary["cases"].append(case_dict)
 
