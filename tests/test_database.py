@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -121,11 +122,30 @@ class DatabaseTestCase(unittest.TestCase):
         self.assertEqual(result["write_failed"], 0)
         self.assertEqual(len(load_cases()), 2)
 
+        refreshed_case = self._case(
+            summary="使用当前规则重新分析的摘要",
+            quality_details={
+                "rule_version": "v8",
+                "adjusted_score": 85,
+            },
+        )
         duplicate_result = append_cases_batch_with_summary(
-            [self._case()], min_score=70
+            [refreshed_case], min_score=70
         )
         self.assertEqual(duplicate_result["news_inserted"], 0)
-        self.assertEqual(duplicate_result["duplicates"], 1)
+        self.assertEqual(duplicate_result["refreshed"], 1)
+        self.assertEqual(duplicate_result["duplicates"], 0)
+        refreshed_row = load_cases().loc[
+            lambda frame: frame["url"] == "https://example.com/news/1"
+        ].iloc[0]
+        self.assertEqual(
+            refreshed_row["summary"],
+            "使用当前规则重新分析的摘要",
+        )
+        self.assertEqual(
+            json.loads(refreshed_row["quality_json"])["rule_version"],
+            "v8",
+        )
 
     def test_review_status_and_task_log(self) -> None:
         self.assertTrue(append_case(self._case(), min_score=70))

@@ -140,7 +140,7 @@ def _bounded_dimension_score(value: Any, maximum: int) -> int:
     return max(0, min(maximum, score))
 
 def _enrich_with_quality(df: pd.DataFrame) -> pd.DataFrame:
-    """从 quality_json 提取 quality_score 和 quality_label 到 DataFrame。"""
+    """只提取当前规则的质量分，旧版评分不参与排序或展示。"""
     if df.empty or "quality_json" not in df.columns:
         return df
     df = df.copy()
@@ -148,8 +148,14 @@ def _enrich_with_quality(df: pd.DataFrame) -> pd.DataFrame:
     labels = []
     for _, row in df.iterrows():
         q = _parse_quality_json(row.get("quality_json"))
-        scores.append(int(q.get("adjusted_score", q.get("total_score", 0))))
-        labels.append(str(q.get("label", "")))
+        if _is_current_quality_details(q, require_body=True):
+            scores.append(
+                _bounded_dimension_score(q.get("adjusted_score"), 100)
+            )
+            labels.append(str(q.get("label", "")))
+        else:
+            scores.append(None)
+            labels.append("")
     df["quality_score"] = scores
     df["quality_label"] = labels
     return df
@@ -271,8 +277,16 @@ def _display_cases(df: pd.DataFrame) -> pd.DataFrame:
         quality_labels = []
         for _, row in display_df.iterrows():
             q = _parse_quality_json(row.get("quality_json"))
-            quality_scores.append(int(q.get("adjusted_score", q.get("total_score", 0))))
-            quality_labels.append(_quality_label_badge(str(q.get("label", ""))))
+            if _is_current_quality_details(q, require_body=True):
+                quality_scores.append(
+                    _bounded_dimension_score(q.get("adjusted_score"), 100)
+                )
+                quality_labels.append(
+                    _quality_label_badge(str(q.get("label", "")))
+                )
+            else:
+                quality_scores.append(None)
+                quality_labels.append("")
         display_df["quality_score"] = quality_scores
         display_df["quality_label"] = quality_labels
 
@@ -353,6 +367,7 @@ def _render_run_summary(summary: dict[str, Any]) -> None:
 
     st.caption(
         f"未达案例门槛：{summary.get('unqualified', 0)} · "
+        f"旧记录更新：{summary.get('refreshed', 0)} · "
         f"重复跳过：{summary.get('duplicates', 0)} · "
         f"数据库写入失败：{summary.get('write_failed', 0)}"
     )
@@ -368,6 +383,10 @@ def _render_run_summary(summary: dict[str, Any]) -> None:
         st.success(
             f"已新增 {summary['news_saved']} 条新闻到新闻池，"
             f"其中 {summary.get('saved', 0)} 条进入案例库。"
+        )
+    elif summary.get("refreshed"):
+        st.success(
+            f"已用当前评分规则更新 {summary['refreshed']} 条已有新闻。"
         )
     elif summary.get("processed") and not summary.get("analyzed"):
         st.error("已提取新闻正文，但 AI 分析全部失败，请查看错误详情。")
@@ -421,10 +440,6 @@ def _render_score_breakdown(quality_details: dict) -> None:
         quality_details,
         require_body=not is_pre_score,
     ):
-        st.info(
-            "这条记录使用的是旧版评分，不能按当前 100 分制换算。"
-            "请重新搜索并完成 AI 分析后查看新版评分。"
-        )
         return
 
     dim_scores = quality_details.get("dimension_scores", {})
@@ -574,13 +589,68 @@ def _persist_latest_search(
         logger.warning("保存最近搜索状态失败: %s", type(exc).__name__)
 
 
+def _completed_search_uses_current_scoring(
+    articles: Any,
+    results: Any,
+) -> bool:
+    """仅允许完整的当前规则搜索状态跨刷新恢复。"""
+    if not isinstance(articles, list) or not articles:
+        return False
+    if not isinstance(results, dict) or not results:
+        return False
+    if any(not isinstance(article, dict) for article in articles):
+        return False
+    if any(
+        not _is_current_quality_details(
+            _quality_state(article.get("quality_pre")),
+            require_body=False,
+        )
+        for article in articles
+    ):
+        return False
+    for detail in results.values():
+        if not isinstance(detail, dict):
+            return False
+        if detail.get("analysis_status") == "成功" and not (
+            _is_current_quality_details(
+                detail.get("quality_details"),
+                require_body=True,
+            )
+        ):
+            return False
+    return True
+
+
+def _clear_search_session() -> None:
+    """移除当前会话中的旧搜索结果，但保留搜索框关键词。"""
+    for key in (
+        "fetched_articles",
+        "fetched_results",
+        "fetched_keyword",
+        "last_run_summary",
+    ):
+        st.session_state.pop(key, None)
+
+
 def _restore_latest_search() -> None:
     """在新 Streamlit 会话中恢复最近一次搜索卡片。"""
+    if st.session_state.get("fetched_articles"):
+        if st.session_state.get("pending_analysis"):
+            return
+        if _completed_search_uses_current_scoring(
+            st.session_state.get("fetched_articles"),
+            st.session_state.get("fetched_results"),
+        ):
+            return
+        _clear_search_session()
+        try:
+            save_last_search_state({})
+        except Exception as exc:
+            logger.warning("清理旧搜索状态失败: %s", type(exc).__name__)
+        return
     if st.session_state.get("latest_search_restored"):
         return
     st.session_state.latest_search_restored = True
-    if st.session_state.get("fetched_articles"):
-        return
     try:
         state = load_last_search_state()
     except Exception as exc:
@@ -592,6 +662,12 @@ def _restore_latest_search() -> None:
     if not articles:
         return
     raw_results = state.get("results", {})
+    if not _completed_search_uses_current_scoring(articles, raw_results):
+        try:
+            save_last_search_state({})
+        except Exception as exc:
+            logger.warning("清理旧搜索状态失败: %s", type(exc).__name__)
+        return
     results = {
         int(index): detail
         for index, detail in raw_results.items()
@@ -650,9 +726,6 @@ def _render_article_cards(
             summary_parts.append(
                 f"综合质量均分 {sum(current_final_scores) // len(current_final_scores)}/100"
             )
-        legacy_count = analyzed_count - len(current_final_scores)
-        if legacy_count > 0:
-            summary_parts.append(f"{legacy_count} 篇旧版评分待更新")
         st.caption(" · ".join(summary_parts))
     else:
         if len(current_pre_scores) == len(articles):
@@ -732,9 +805,6 @@ def _render_article_cards(
                         )
                         label = result.get("quality_label", "")
                         st.metric("综合质量", f"{quality}/100", label)
-                    elif result.get("analysis_status") == "成功":
-                        st.metric("综合质量", "待更新")
-                        st.caption("旧版评分不能换算为新版 100 分制")
                     status = result.get("analysis_status", "?")
                     store = result.get("storage_status", "?")
                     st.caption(f"AI: {status} | 写入: {store}")
@@ -749,22 +819,20 @@ def _render_article_cards(
                     elif is_current_pre_version:
                         st.metric("基础分", "计算中")
                         st.caption("AI 正在评估来源权威度…")
-                    else:
-                        st.metric("基础分", "待更新")
-                        st.caption("旧搜索记录，请重新搜索生成新版评分")
 
-            if result and result.get("analysis_status") == "成功":
-                if has_current_final_score:
-                    quality_score = _bounded_dimension_score(
-                        result.get("quality_score"),
-                        100,
-                    )
-                    quality_label = result.get("quality_label", "")
-                    expander_label = (
-                        f"⭐ 查看完整评分｜{quality_score}/100 · {quality_label}"
-                    )
-                else:
-                    expander_label = "⭐ 旧版评分待更新"
+            if (
+                result
+                and result.get("analysis_status") == "成功"
+                and has_current_final_score
+            ):
+                quality_score = _bounded_dimension_score(
+                    result.get("quality_score"),
+                    100,
+                )
+                quality_label = result.get("quality_label", "")
+                expander_label = (
+                    f"⭐ 查看完整评分｜{quality_score}/100 · {quality_label}"
+                )
                 with st.expander(expander_label):
                     if isinstance(quality_json, dict):
                         _render_score_breakdown(quality_json)

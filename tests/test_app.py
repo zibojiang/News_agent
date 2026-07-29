@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 
-from database import save_last_search_state
+from database import load_last_search_state, save_last_search_state
 from quality_scorer import NEWS_QUALITY_RULE_VERSION
 
 
@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class AppSmokeTestCase(unittest.TestCase):
-    def test_restores_latest_cards_in_a_new_streamlit_session(self) -> None:
+    def test_discards_legacy_cards_in_a_new_streamlit_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = str(Path(temp_dir) / "industry_news.db")
             with patch.dict(
@@ -65,17 +65,95 @@ class AppSmokeTestCase(unittest.TestCase):
 
                 app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
                 self.assertEqual(list(app.exception), [])
-                self.assertTrue(
+                self.assertFalse(
                     any(
                         "刷新后仍然展示的新闻" in markdown.value
                         for markdown in app.markdown
                     )
                 )
+                self.assertEqual(load_last_search_state(), {})
+
+    def test_restores_cards_scored_with_current_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = str(Path(temp_dir) / "industry_news.db")
+            dimensions = {
+                "source_credibility": 20,
+                "content_density": 8,
+                "data_richness": 8,
+                "freshness": 4,
+            }
+            body_dimensions = {
+                "evidence_quality": 12,
+                "completeness": 8,
+                "transparency": 8,
+                "headline_body_consistency": 5,
+                "balance": 4,
+                "clarity": 5,
+            }
+            with patch.dict(
+                os.environ,
+                {
+                    "DATABASE_PATH": database_path,
+                    "DEPLOYMENT_MODE": "cloud_demo",
+                    "ADMIN_PASSWORD": "",
+                },
+            ):
+                save_last_search_state(
+                    {
+                        "keyword": "复星AI",
+                        "articles": [
+                            {
+                                "title": "当前规则评分新闻",
+                                "quality_pre": {
+                                    "adjusted_score": 40,
+                                    "dimension_scores": dimensions,
+                                    "dimension_reasons": {},
+                                    "penalties": [],
+                                    "label": "预筛",
+                                    "rule_version": NEWS_QUALITY_RULE_VERSION,
+                                    "source_score_method": "ai",
+                                },
+                            }
+                        ],
+                        "results": {
+                            "0": {
+                                "analysis_status": "成功",
+                                "storage_status": "已更新",
+                                "score": 88,
+                                "summary": "当前规则生成的摘要。",
+                                "quality_score": 82,
+                                "quality_label": "质量良好",
+                                "quality_details": {
+                                    "adjusted_score": 82,
+                                    "dimension_scores": {
+                                        **dimensions,
+                                        **body_dimensions,
+                                    },
+                                    "dimension_reasons": {},
+                                    "penalties": [],
+                                    "label": "质量良好",
+                                    "rule_version": NEWS_QUALITY_RULE_VERSION,
+                                    "source_score_method": "ai",
+                                },
+                            }
+                        },
+                        "run_summary": {},
+                    }
+                )
+
+                app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+                self.assertEqual(list(app.exception), [])
                 self.assertTrue(
-                    any("刷新后恢复的 AI 摘要" in markdown.value for markdown in app.markdown)
+                    any(
+                        "当前规则评分新闻" in markdown.value
+                        for markdown in app.markdown
+                    )
                 )
                 self.assertTrue(
-                    any("旧版评分" in info.value for info in app.info)
+                    any(
+                        "当前规则生成的摘要" in markdown.value
+                        for markdown in app.markdown
+                    )
                 )
 
     def test_cloud_demo_is_open_without_admin_password(self) -> None:
@@ -126,26 +204,6 @@ class AppSmokeTestCase(unittest.TestCase):
                     }
                 ]
                 app.session_state["fetched_keyword"] = "复星AI"
-                app.run(timeout=20)
-                self.assertTrue(
-                    any("已搜索到的文章（1篇）" in markdown.value for markdown in app.markdown)
-                )
-                self.assertTrue(
-                    any("✓ 已搜索到" in markdown.value for markdown in app.markdown)
-                )
-                self.assertTrue(
-                    any(
-                        metric.label == "基础分" and metric.value == "40/50"
-                        for metric in app.metric
-                    )
-                )
-                self.assertTrue(
-                    any(
-                        "AI 评估：主流来源" in caption.value
-                        for caption in app.caption
-                    )
-                )
-
                 app.session_state["fetched_results"] = {
                     0: {
                         "analysis_status": "成功",
@@ -181,6 +239,12 @@ class AppSmokeTestCase(unittest.TestCase):
                     }
                 }
                 app.run(timeout=20)
+                self.assertTrue(
+                    any("已搜索到的文章（1篇）" in markdown.value for markdown in app.markdown)
+                )
+                self.assertTrue(
+                    any("AI 评估：主流来源" in caption.value for caption in app.caption)
+                )
                 self.assertTrue(
                     any("AI 新闻摘要" in markdown.value for markdown in app.markdown)
                 )

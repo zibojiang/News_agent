@@ -1086,6 +1086,7 @@ def run_pipeline(
         "analyzed": 0,
         "analysis_failed": 0,
         "news_saved": 0,
+        "refreshed": 0,
         "saved": 0,
         "unqualified": 0,
         "duplicates": 0,
@@ -1360,12 +1361,14 @@ def run_pipeline(
                     summary["cases"], min_score=min_score
                 )
                 summary["news_saved"] = int(write_summary["news_inserted"])
+                summary["refreshed"] = int(write_summary.get("refreshed", 0))
                 summary["saved"] = int(write_summary["qualified_inserted"])
                 summary["duplicates"] = int(write_summary["duplicates"])
                 summary["write_failed"] = int(write_summary["write_failed"])
 
                 storage_labels = {
                     "inserted": "已新增",
+                    "refreshed": "已更新",
                     "duplicate": "重复",
                     "failed": "写入失败",
                 }

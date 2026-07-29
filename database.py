@@ -459,6 +459,77 @@ def append_cases_batch(
     return int(result["qualified_inserted"])
 
 
+def _refresh_existing_case(
+    case: dict[str, Any],
+    db_path: str | None,
+    min_score: int,
+) -> bool:
+    """用最新分析覆盖重复新闻的旧评分，同时保留人工审核结论。"""
+    path = initialize_database(db_path)
+    topic_id = str(case.get("topic_id") or "CUSTOM")
+    url = str(case.get("url", "")).strip()
+    content_hash = str(case.get("content_hash", "")).strip()
+    clauses = ["url = ?"]
+    params: list[Any] = [url]
+    if content_hash:
+        clauses.append("content_hash = ?")
+        params.append(content_hash)
+
+    with _connect(path) as connection:
+        row = connection.execute(
+            f"""
+            SELECT id, review_status
+            FROM news_cases
+            WHERE topic_id = ? AND ({' OR '.join(clauses)})
+            ORDER BY CASE WHEN url = ? THEN 0 ELSE 1 END, id
+            LIMIT 1
+            """,
+            [topic_id, *params, url],
+        ).fetchone()
+        if row is None:
+            return False
+
+        is_qualified = int(_case_is_qualified(case, min_score))
+        review_status = str(row["review_status"])
+        if review_status not in {"已确认", "已忽略"}:
+            review_status = "待审核" if is_qualified else "低相关"
+        cursor = connection.execute(
+            """
+            UPDATE news_cases SET
+                published_at = ?, title = ?, source = ?, dimension = ?,
+                category = ?, topic_name = ?, industry_keyword = ?, summary = ?,
+                bullet_points = ?, evidence_quotes = ?, quality_json = ?,
+                involved_companies = ?, regions = ?, metric_tags = ?,
+                relevance_score = ?, is_qualified = ?, review_status = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                str(case.get("published_at") or ""),
+                str(case.get("title") or ""),
+                str(case.get("source") or ""),
+                str(case.get("dimension") or ""),
+                str(case.get("category") or ""),
+                str(case.get("topic_name") or ""),
+                str(case.get("industry_keyword") or ""),
+                str(case.get("summary") or ""),
+                _json_string(case.get("bullet_points")),
+                _json_string(case.get("evidence_quotes")),
+                _json_string(case.get("quality_details") or {}),
+                _json_string(case.get("involved_companies")),
+                _json_string(case.get("regions")),
+                _json_string(case.get("metric_tags")),
+                max(0, min(100, int(case.get("relevance_score", 0)))),
+                is_qualified,
+                review_status,
+                _now(),
+                int(row["id"]),
+            ),
+        )
+        connection.commit()
+    return cursor.rowcount > 0
+
+
 def append_cases_batch_with_summary(
     cases: list[dict[str, Any]],
     db_path: str | None = None,
@@ -468,6 +539,7 @@ def append_cases_batch_with_summary(
     result: dict[str, Any] = {
         "news_inserted": 0,
         "qualified_inserted": 0,
+        "refreshed": 0,
         "duplicates": 0,
         "write_failed": 0,
         "items": [],
@@ -494,9 +566,13 @@ def append_cases_batch_with_summary(
                 topic_id=topic_id,
                 content_hash=content_hash,
             ):
-                result["duplicates"] += 1
-                item["storage_status"] = "duplicate"
-                item["reason"] = "同一主题下已存在相同链接或正文"
+                if _refresh_existing_case(case, db_path, min_score):
+                    result["refreshed"] += 1
+                    item["storage_status"] = "refreshed"
+                    item["reason"] = "已用当前评分规则更新原有记录"
+                else:
+                    result["write_failed"] += 1
+                    item["reason"] = "找到重复记录，但更新当前评分失败"
             elif append_case(case, db_path=db_path, min_score=min_score):
                 result["news_inserted"] += 1
                 item["storage_status"] = "inserted"
