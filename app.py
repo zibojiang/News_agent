@@ -11,6 +11,7 @@ import io
 import logging
 import os
 from datetime import datetime
+from time import perf_counter
 from typing import Any
 
 import pandas as pd
@@ -293,6 +294,13 @@ def _render_run_summary(summary: dict[str, Any]) -> None:
         f"重复跳过：{summary.get('duplicates', 0)} · "
         f"数据库写入失败：{summary.get('write_failed', 0)}"
     )
+    timing_parts = []
+    if summary.get("search_seconds") is not None:
+        timing_parts.append(f"新闻搜索 {summary['search_seconds']:.1f} 秒")
+    if summary.get("analysis_seconds") is not None:
+        timing_parts.append(f"AI 分析 {summary['analysis_seconds']:.1f} 秒")
+    if timing_parts:
+        st.caption("本次耗时：" + " · ".join(timing_parts))
 
     if summary.get("news_saved"):
         st.success(
@@ -841,6 +849,7 @@ def _render_search_page(cloud_demo: bool) -> None:
             st.session_state.last_search_keyword = keyword
             st.session_state.pop("last_run_summary", None)
             st.session_state.pop("fetched_results", None)
+            search_started = perf_counter()
             with st.spinner(f"正在搜索「{keyword}」相关的新闻…"):
                 try:
                     articles = fetch_and_pre_score(
@@ -851,6 +860,7 @@ def _render_search_page(cloud_demo: bool) -> None:
                     logger.error("搜索失败: %s", exc, exc_info=True)
                     st.error(f"搜索失败：{exc}")
                     articles = []
+            search_seconds = perf_counter() - search_started
 
             if articles:
                 st.session_state.fetched_articles = articles
@@ -859,13 +869,14 @@ def _render_search_page(cloud_demo: bool) -> None:
                 with result_area.container():
                     _render_article_cards(articles, keyword)
 
-                st.markdown("### AI 正在逐篇分析")
+                st.markdown("### AI 正在并行分析")
                 progress_bar = st.progress(0.0, text="准备分析…")
 
                 def update_progress(message: str, value: float) -> None:
                     progress_bar.progress(value, text=message)
 
                 try:
+                    analysis_started = perf_counter()
                     run_summary = run_pipeline(
                         industry_keyword=keyword,
                         min_score=int(min_score),
@@ -874,6 +885,10 @@ def _render_search_page(cloud_demo: bool) -> None:
                         trigger_type="manual",
                         progress_callback=update_progress,
                         pre_fetched_articles=articles,
+                    )
+                    run_summary["search_seconds"] = search_seconds
+                    run_summary["analysis_seconds"] = (
+                        perf_counter() - analysis_started
                     )
                     result_map = {
                         index: detail

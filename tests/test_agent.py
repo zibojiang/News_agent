@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent import (
@@ -9,6 +11,8 @@ from agent import (
     NewsCaseSchema,
     _keep_verifiable_evidence,
     analyze_article,
+    analyze_article_with_chat_completions,
+    get_ai_analysis_workers,
     get_ai_provider,
     get_gemini_model,
     get_openai_model,
@@ -29,6 +33,54 @@ class AgentEvidenceTestCase(unittest.TestCase):
             self.assertEqual(get_ai_provider(), "gemini")
             self.assertEqual(get_gemini_model(), "gemini-test-model")
             self.assertEqual(get_openai_model(), "openai-test-model")
+
+    def test_ai_worker_setting_is_bounded(self) -> None:
+        with patch.dict(os.environ, {"AI_ANALYSIS_WORKERS": "20"}):
+            self.assertEqual(get_ai_analysis_workers(), 6)
+        with patch.dict(os.environ, {"AI_ANALYSIS_WORKERS": "invalid"}):
+            self.assertEqual(get_ai_analysis_workers(), 3)
+
+    def test_deepseek_disables_thinking_for_structured_extraction(self) -> None:
+        analysis = NewsCaseSchema(
+            title="测试新闻",
+            url="https://example.com/news/1",
+            summary="测试摘要",
+            bullet_points=["营收同比增长 20%"],
+            evidence_quotes=["营收同比增长 20%"],
+            involved_companies=["测试企业"],
+            regions=["中国"],
+            metric_tags=["营收"],
+            relevance_score=85,
+        )
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=analysis.model_dump_json())
+                )
+            ]
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AI_PROVIDER": "deepseek",
+                    "DEEPSEEK_THINKING": "disabled",
+                },
+            ),
+            patch("agent._get_openai_client") as get_client,
+        ):
+            get_client.return_value.chat.completions.create.return_value = response
+            analyze_article_with_chat_completions(
+                article_title=analysis.title,
+                article_url=analysis.url,
+                article_text="测试企业营收同比增长 20%。",
+                industry_keyword="酒店营收",
+            )
+
+        request = get_client.return_value.chat.completions.create.call_args.kwargs
+        self.assertEqual(
+            request["extra_body"], {"thinking": {"type": "disabled"}}
+        )
 
     def test_routes_analysis_to_openai(self) -> None:
         expected = NewsCaseSchema(
@@ -164,6 +216,66 @@ class AgentEvidenceTestCase(unittest.TestCase):
 
         fetch_batch.assert_not_called()
         self.assertEqual(summary["processed"], 0)
+
+    def test_parallel_analysis_preserves_article_order(self) -> None:
+        articles = [
+            {
+                "title": title,
+                "url": f"https://example.com/news/{index}",
+                "content": f"{title}营收同比增长 20%。",
+                "content_hash": f"hash-{index}",
+            }
+            for index, title in enumerate(["第一篇", "第二篇"], start=1)
+        ]
+
+        def analyze_side_effect(**kwargs: object) -> NewsCaseSchema:
+            title = str(kwargs["article_title"])
+            if title == "第一篇":
+                time.sleep(0.02)
+            return NewsCaseSchema(
+                title=title,
+                url=str(kwargs["article_url"]),
+                summary="测试摘要",
+                bullet_points=["营收同比增长 20%"],
+                evidence_quotes=["营收同比增长 20%"],
+                involved_companies=[],
+                regions=[],
+                metric_tags=["营收"],
+                relevance_score=85,
+            )
+
+        write_summary = {
+            "news_inserted": 2,
+            "qualified_inserted": 2,
+            "duplicates": 0,
+            "write_failed": 0,
+            "items": [
+                {"storage_status": "inserted", "reason": ""},
+                {"storage_status": "inserted", "reason": ""},
+            ],
+        }
+        progress_messages: list[str] = []
+        with (
+            patch.dict(os.environ, {"AI_ANALYSIS_WORKERS": "2"}),
+            patch("agent.analyze_article", side_effect=analyze_side_effect),
+            patch(
+                "agent.append_cases_batch_with_summary",
+                return_value=write_summary,
+            ),
+            patch("agent.record_task_run", return_value=1),
+        ):
+            summary = run_pipeline(
+                "酒店营收",
+                topic={"topic_id": "S1.1", "topic_name": "测试主题"},
+                pre_fetched_articles=articles,
+                progress_callback=lambda message, _: progress_messages.append(message),
+            )
+
+        self.assertEqual(
+            [detail["title"] for detail in summary["details"]],
+            ["第一篇", "第二篇"],
+        )
+        self.assertTrue(any("2 路" in message for message in progress_messages))
 
 
 if __name__ == "__main__":

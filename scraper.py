@@ -268,12 +268,6 @@ def fetch_latest_news(query: str, max_articles: int = MAX_ARTICLES_PER_RUN) -> l
         logger.error(error_msg)
         raise RuntimeError(error_msg)
 
-    # 解析 Google News 等跳转链接，替换为媒体原文 URL
-    for article in articles:
-        original_url = article["url"]
-        resolved_url = _resolve_final_url(original_url)
-        article["url"] = resolved_url
-
     logger.info("共获取 %d 条真实新闻", len(articles))
     return articles[:max_articles]
 
@@ -284,7 +278,11 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
-def extract_article_text(url: str, max_chars: int = 12000) -> str:
+def extract_article_text(
+    url: str,
+    max_chars: int = 12000,
+    resolve_url: bool = True,
+) -> str:
     """
     抓取指定 URL 并提取去除 HTML 标签后的纯净正文。
 
@@ -296,14 +294,15 @@ def extract_article_text(url: str, max_chars: int = 12000) -> str:
     Args:
         url: 文章网页链接
         max_chars: 返回文本最大字符数（控制 AI Token 消耗）
+        resolve_url: 是否在抓取前解析跳转链接
 
     Returns:
         清洗后的正文文本；抓取或解析失败时返回空字符串
     """
     logger.info("开始提取正文: %s", url)
 
-    # 先解析跳转链接，确保抓取的是媒体原文页面
-    url = _resolve_final_url(url)
+    if resolve_url:
+        url = _resolve_final_url(url)
 
     response = _safe_get(url)
     if response is None:
@@ -386,13 +385,15 @@ def fetch_and_extract_batch(
         包含 title/url/source/published_at/content/content_hash 的字典列表
     """
     # 多抓一些以备质量筛选
-    fetch_count = max(15, max_articles * 2)
+    # 保留少量候选供正文质量筛选，避免为 8 篇结果预先访问 16 个网站。
+    fetch_count = max(8, max_articles + 4)
     news_list = fetch_latest_news(query, max_articles=fetch_count)
     results: list[dict[str, Any]] = []
 
     def _extract_one(item: dict[str, Any]) -> dict[str, Any] | None:
-        url = item["url"]
-        content = extract_article_text(url)
+        # URL 解析与正文抓取放在同一线程中，并确保每条链接只解析一次。
+        url = _resolve_final_url(item["url"])
+        content = extract_article_text(url, resolve_url=False)
         if not content:
             logger.warning("跳过无正文文章: %s", item.get("title"))
             return None

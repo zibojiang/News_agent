@@ -51,6 +51,15 @@ def get_gemini_model() -> str:
     return os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
 
 
+def get_ai_analysis_workers() -> int:
+    """返回单次任务的 AI 并发数，限制在安全范围内。"""
+    try:
+        configured = int(os.getenv("AI_ANALYSIS_WORKERS", "3"))
+    except ValueError:
+        configured = 3
+    return max(1, min(6, configured))
+
+
 # 保留兼容旧调用的导入时快照；核心分析和页面展示使用上面的动态函数。
 DEFAULT_AI_PROVIDER = get_ai_provider()
 DEFAULT_OPENAI_MODEL = get_openai_model()
@@ -400,6 +409,17 @@ def analyze_article_with_chat_completions(
                 MAX_RETRIES,
                 article_title[:50],
             )
+            request_options: dict[str, Any] = {}
+            if get_ai_provider() == "deepseek":
+                thinking_mode = os.getenv(
+                    "DEEPSEEK_THINKING", "disabled"
+                ).strip().lower()
+                if thinking_mode not in {"enabled", "disabled"}:
+                    thinking_mode = "disabled"
+                request_options["extra_body"] = {
+                    "thinking": {"type": thinking_mode}
+                }
+
             response = client.chat.completions.create(
                 model=model_name,
                 messages=[
@@ -407,6 +427,7 @@ def analyze_article_with_chat_completions(
                     {"role": "user", "content": user_prompt},
                 ],
                 response_format={"type": "json_object"},
+                **request_options,
             )
             content = response.choices[0].message.content
             if not content:
@@ -690,6 +711,54 @@ def fetch_and_pre_score(
     return articles
 
 
+def _analyze_articles_parallel(
+    articles: list[dict[str, Any]],
+    industry_keyword: str,
+    topic: dict[str, Any],
+    progress_callback: Callable[[str, float], None] | None,
+) -> list[NewsCaseSchema | Exception | None]:
+    """并发执行模型调用，结果按原文章顺序返回。"""
+    total = len(articles)
+    if total == 0:
+        return []
+
+    worker_count = min(get_ai_analysis_workers(), total)
+    outcomes: list[NewsCaseSchema | Exception | None] = [None] * total
+    _notify_progress(
+        progress_callback,
+        f"AI 正在并行分析 {total} 篇文章（{worker_count} 路）…",
+        0.15,
+    )
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(
+                analyze_article,
+                article_title=article["title"],
+                article_url=article["url"],
+                article_text=article["content"],
+                industry_keyword=industry_keyword,
+                topic=topic,
+            ): index
+            for index, article in enumerate(articles)
+        }
+        completed = 0
+        for future in as_completed(futures):
+            index = futures[future]
+            try:
+                outcomes[index] = future.result()
+            except Exception as exc:
+                outcomes[index] = exc
+            completed += 1
+            _notify_progress(
+                progress_callback,
+                f"AI 已完成 {completed}/{total} 篇分析…",
+                0.15 + 0.7 * (completed / total),
+            )
+
+    return outcomes
+
+
 
 def run_pipeline(
     industry_keyword: str,
@@ -781,6 +850,12 @@ def run_pipeline(
             f"已提取 {total_articles} 篇正文，开始 AI 分析…",
             0.15,
         )
+        analysis_outcomes = _analyze_articles_parallel(
+            articles,
+            industry_keyword,
+            topic,
+            progress_callback,
+        )
 
         for index, article in enumerate(articles, start=1):
             summary["processed"] += 1
@@ -793,20 +868,11 @@ def run_pipeline(
                 "storage_status": "未写入",
                 "reason": "",
             }
-            _notify_progress(
-                progress_callback,
-                f"AI 分析第 {index}/{total_articles} 篇：{detail['title'][:35]}",
-                0.15 + 0.7 * ((index - 1) / total_articles),
-            )
-
             try:
-                result = analyze_article(
-                    article_title=article["title"],
-                    article_url=article["url"],
-                    article_text=article["content"],
-                    industry_keyword=industry_keyword,
-                    topic=topic,
-                )
+                outcome = analysis_outcomes[index - 1]
+                if isinstance(outcome, Exception):
+                    raise outcome
+                result = outcome
             except ValueError as exc:
                 reason = str(exc)
                 summary["analysis_failed"] += 1
