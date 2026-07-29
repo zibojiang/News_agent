@@ -121,6 +121,7 @@ class AppSmokeTestCase(unittest.TestCase):
                             "penalties": [],
                             "label": "预筛",
                             "rule_version": NEWS_QUALITY_RULE_VERSION,
+                            "source_score_method": "ai",
                         },
                     }
                 ]
@@ -140,7 +141,7 @@ class AppSmokeTestCase(unittest.TestCase):
                 )
                 self.assertTrue(
                     any(
-                        "来源权威度（规则预估）" in caption.value
+                        "来源权威度（AI 评分）" in caption.value
                         for caption in app.caption
                     )
                 )
@@ -174,6 +175,7 @@ class AppSmokeTestCase(unittest.TestCase):
                             "penalties": [],
                             "label": "高质量",
                             "rule_version": NEWS_QUALITY_RULE_VERSION,
+                            "source_score_method": "ai",
                             "score_cap": 100,
                         },
                     }

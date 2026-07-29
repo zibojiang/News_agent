@@ -1184,6 +1184,7 @@ def _render_search_page(cloud_demo: bool) -> None:
                 st.session_state.fetched_keyword = keyword
                 _persist_latest_search(keyword, articles)
                 st.session_state.pending_analysis = {
+                    "stage": "source",
                     "keyword": keyword,
                     "min_score": int(min_score),
                     "max_articles": int(max_articles),
@@ -1201,15 +1202,38 @@ def _render_search_page(cloud_demo: bool) -> None:
             st.session_state.get("fetched_results"),
         )
 
-        pending_analysis = st.session_state.pop("pending_analysis", None)
+        pending_analysis = st.session_state.get("pending_analysis")
         if pending_analysis:
-            st.markdown("### AI 正在并行分析")
-            progress_bar = st.progress(0.0, text="已展示新闻，正在准备 AI 分析…")
+            stage = pending_analysis.get("stage", "source")
+            if stage == "source":
+                st.markdown("### AI 正在评估来源权威度")
+                progress_text = "新闻已展示，正在生成来源 AI 评分…"
+            else:
+                st.markdown("### AI 正在分析新闻正文")
+                progress_text = "基础分已生成，正在分析正文质量…"
+            progress_bar = st.progress(0.0, text=progress_text)
 
             def update_progress(message: str, value: float) -> None:
                 progress_bar.progress(value, text=message)
 
             try:
+                if stage == "source":
+                    source_errors = score_sources_with_ai(
+                        articles,
+                        progress_callback=update_progress,
+                    )
+                    st.session_state.fetched_articles = articles
+                    pending_analysis["stage"] = "body"
+                    pending_analysis["source_errors"] = source_errors
+                    st.session_state.pending_analysis = pending_analysis
+                    _persist_latest_search(
+                        pending_analysis["keyword"],
+                        articles,
+                    )
+                    progress_bar.progress(1.0, text="来源评分完成，基础分已生成")
+                    st.rerun()
+
+                st.session_state.pop("pending_analysis", None)
                 analysis_started = perf_counter()
                 run_summary = run_pipeline(
                     industry_keyword=pending_analysis["keyword"],
