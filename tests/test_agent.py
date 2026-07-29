@@ -10,10 +10,14 @@ from agent import (
     ArticleAnalysisError,
     BodyQualitySchema,
     NewsCaseSchema,
+    SEARCH_RELEVANCE_RULE_VERSION,
+    SearchIntentSchema,
     SourceCredibilitySchema,
     _keep_verifiable_evidence,
     analyze_article,
     analyze_article_with_chat_completions,
+    analyze_search_intent,
+    calculate_recommendation_score,
     get_ai_analysis_workers,
     get_ai_provider,
     get_gemini_model,
@@ -61,6 +65,38 @@ class AgentEvidenceTestCase(unittest.TestCase):
             self.assertEqual(get_ai_analysis_workers(), 6)
         with patch.dict(os.environ, {"AI_ANALYSIS_WORKERS": "invalid"}):
             self.assertEqual(get_ai_analysis_workers(), 3)
+
+    def test_search_intent_generates_chinese_and_english_queries(self) -> None:
+        intent = SearchIntentSchema(
+            intent_summary="了解数字集成电路产业的新技术和产业化方向",
+            target_topics=["数字集成电路", "技术趋势", "产业化"],
+            chinese_queries=["数字集成电路 产业 新方向"],
+            english_queries=["digital integrated circuit industry trends"],
+            relevance_criteria=["新闻实质讨论新技术或产业化方向"],
+        )
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=intent.model_dump_json())
+                )
+            ]
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {"AI_PROVIDER": "deepseek", "DEEPSEEK_THINKING": "disabled"},
+            ),
+            patch("agent._get_openai_client") as get_client,
+        ):
+            get_client.return_value.chat.completions.create.return_value = response
+            result = analyze_search_intent(
+                "数字集成电路产业有哪些新方向"
+            )
+
+        self.assertEqual(result.chinese_queries, intent.chinese_queries)
+        self.assertEqual(result.english_queries, intent.english_queries)
+        request = get_client.return_value.chat.completions.create.call_args.kwargs
+        self.assertEqual(request["response_format"], {"type": "json_object"})
 
     def test_deepseek_disables_thinking_for_structured_extraction(self) -> None:
         analysis = NewsCaseSchema(
@@ -120,7 +156,10 @@ class AgentEvidenceTestCase(unittest.TestCase):
             return_value=SourceCredibilitySchema(
                 score=19,
                 reason="具有明确编辑责任的行业媒体",
-                relevance_score=86,
+                core_topic_match_score=35,
+                information_need_match_score=26,
+                semantic_coverage_score=17,
+                directness_score=8,
                 relevance_reason="新闻核心事件与搜索主题直接相关",
             ),
         ):
@@ -132,7 +171,25 @@ class AgentEvidenceTestCase(unittest.TestCase):
         self.assertEqual(quality.source_score_method, "ai")
         self.assertIn("AI 评估", quality.dimension_reasons["source_credibility"])
         self.assertEqual(article["search_relevance_score"], 86)
+        self.assertEqual(
+            article["search_relevance_dimensions"],
+            {
+                "core_topic_match": 35,
+                "information_need_match": 26,
+                "semantic_coverage": 17,
+                "directness": 8,
+            },
+        )
+        self.assertEqual(
+            article["search_relevance_rule_version"],
+            SEARCH_RELEVANCE_RULE_VERSION,
+        )
         self.assertTrue(article["search_relevance_scored"])
+
+    def test_recommendation_score_prioritizes_search_relevance(self) -> None:
+        self.assertEqual(calculate_recommendation_score(88, 85), 87)
+        self.assertEqual(calculate_recommendation_score(100, 0), 70)
+        self.assertEqual(calculate_recommendation_score(0, 100), 30)
 
     def test_pipeline_skips_body_ai_when_search_relevance_is_low(self) -> None:
         article = {

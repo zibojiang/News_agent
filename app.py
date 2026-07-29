@@ -27,8 +27,11 @@ load_dotenv(
 from access_control import is_cloud_demo
 from agent import (
     BODY_ANALYSIS_RELEVANCE_THRESHOLD,
+    SEARCH_RELEVANCE_DIMENSION_MAXIMA,
     SEARCH_RELEVANCE_DISPLAY_THRESHOLD,
+    SEARCH_RELEVANCE_RULE_VERSION,
     analyze_search_intent,
+    calculate_recommendation_score,
     fallback_search_intent,
     fetch_and_pre_score,
     get_ai_provider,
@@ -102,6 +105,12 @@ BODY_QUALITY_DIMENSIONS = {
     "headline_body_consistency": ("标题正文一致性", 5),
     "balance": ("客观与平衡性", 5),
     "clarity": ("清晰与连贯性", 5),
+}
+SEARCH_RELEVANCE_DIMENSIONS = {
+    "core_topic_match": ("核心主题匹配", 40),
+    "information_need_match": ("信息需求匹配", 30),
+    "semantic_coverage": ("语义内容覆盖", 20),
+    "directness": ("直接相关程度", 10),
 }
 
 
@@ -531,6 +540,18 @@ def _render_search_relevance(
         or (result or {}).get("relevance_reason", "")
     )
     st.markdown(f"#### 🎯 搜索相关性 {relevance}/100")
+    dimensions = article.get("search_relevance_dimensions")
+    if not isinstance(dimensions, dict) and result:
+        quality_details = result.get("quality_details")
+        if isinstance(quality_details, dict):
+            dimensions = quality_details.get("search_relevance_dimensions")
+    if isinstance(dimensions, dict):
+        dimension_parts = []
+        for key, (label, maximum) in SEARCH_RELEVANCE_DIMENSIONS.items():
+            score = _bounded_dimension_score(dimensions.get(key), maximum)
+            dimension_parts.append(f"{label} {score}/{maximum}")
+            st.markdown(f"**{label}：{score}/{maximum} 分**")
+        st.caption("计算方式：" + " + ".join(dimension_parts))
     if reason:
         st.caption(reason)
     st.caption("搜索相关性用于筛选和排序，不计入新闻质量基础分 50 分。")
@@ -597,11 +618,17 @@ def _persist_latest_search(
                 "source_ai_scored": bool(article.get("source_ai_scored", False)),
                 "source_ai_error": str(article.get("source_ai_error", "")),
                 "search_relevance_score": article.get("search_relevance_score"),
+                "search_relevance_dimensions": dict(
+                    article.get("search_relevance_dimensions", {}) or {}
+                ),
                 "search_relevance_reason": str(
                     article.get("search_relevance_reason", "")
                 ),
                 "search_relevance_scored": bool(
                     article.get("search_relevance_scored", False)
+                ),
+                "search_relevance_rule_version": str(
+                    article.get("search_relevance_rule_version", "")
                 ),
             }
         )
@@ -642,6 +669,29 @@ def _completed_search_uses_current_scoring(
         for article in articles
     ):
         return False
+    for article in articles:
+        if (
+            article.get("search_relevance_rule_version")
+            != SEARCH_RELEVANCE_RULE_VERSION
+        ):
+            return False
+        dimensions = article.get("search_relevance_dimensions")
+        if not isinstance(dimensions, dict):
+            return False
+        if set(SEARCH_RELEVANCE_DIMENSION_MAXIMA) - set(dimensions):
+            return False
+        for key, maximum in SEARCH_RELEVANCE_DIMENSION_MAXIMA.items():
+            value = dimensions.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False
+            if not 0 <= value <= maximum:
+                return False
+        if round(
+            sum(dimensions[key] for key in SEARCH_RELEVANCE_DIMENSION_MAXIMA)
+        ) != round(
+            article["search_relevance_score"]
+        ):
+            return False
     if any(
         not _is_current_quality_details(
             _quality_state(article.get("quality_pre")),
@@ -772,6 +822,21 @@ def _render_article_cards(
     intent = st.session_state.get("fetched_search_intent", {})
     if isinstance(intent, dict) and intent.get("intent_summary"):
         st.info(f"🧠 AI 理解的搜索目标：{intent['intent_summary']}")
+        with st.expander("查看本次中英文检索策略"):
+            target_topics = intent.get("target_topics", []) or []
+            chinese_queries = intent.get("chinese_queries", []) or []
+            english_queries = intent.get("english_queries", []) or []
+            relevance_criteria = intent.get("relevance_criteria", []) or []
+            if target_topics:
+                st.markdown("**目标主题：**" + " · ".join(map(str, target_topics)))
+            if chinese_queries:
+                st.markdown("**中文检索词：**" + " · ".join(map(str, chinese_queries)))
+            if english_queries:
+                st.markdown("**英文检索词：**" + " · ".join(map(str, english_queries)))
+            if relevance_criteria:
+                st.markdown("**相关性判断标准：**")
+                for criterion in relevance_criteria:
+                    st.markdown(f"- {criterion}")
     if results:
         current_final_scores = [
             _bounded_dimension_score(result.get("quality_score"), 100)
@@ -902,7 +967,7 @@ def _render_article_cards(
                             )
                     elif is_current_pre_version:
                         st.metric("基础分", "计算中")
-                        st.caption("AI 正在评估来源权威度…")
+                        st.caption("AI 正在评估搜索相关性与来源权威度…")
 
             if (
                 result
@@ -924,7 +989,7 @@ def _render_article_cards(
                         100,
                     )
                     st.markdown(f"**推荐分 {recommendation}/100**")
-                    st.caption("推荐分 = 搜索相关性 × 60% + 综合质量 × 40%")
+                    st.caption("推荐分 = 搜索相关性 × 70% + 综合质量 × 30%")
                     if isinstance(quality_json, dict):
                         _render_score_breakdown(quality_json)
                     else:
@@ -1483,7 +1548,7 @@ def _render_search_page(cloud_demo: bool) -> None:
                     if isinstance(relevance, (int, float)) and not isinstance(
                         relevance, bool
                     ):
-                        return float(relevance) * 0.6
+                        return float(calculate_recommendation_score(relevance, 0))
                     return -1.0
 
                 ranked_pairs.sort(key=ranking_score, reverse=True)

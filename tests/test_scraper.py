@@ -13,7 +13,7 @@ class ScraperBatchTestCase(unittest.TestCase):
 
         def fetch_source(_url: str, _limit: int, source_name: str):
             requested_urls.append(_url)
-            if source_name == "Google News 中文":
+            if source_name.startswith("Google News 中文"):
                 return [
                     {"title": "中文行业新闻", "url": "https://example.cn/1", "source": "普通媒体"},
                     {"title": "中文权威新闻", "url": "https://example.cn/2", "source": "新华社"},
@@ -27,11 +27,26 @@ class ScraperBatchTestCase(unittest.TestCase):
                 "复星AI",
                 max_articles=3,
                 english_query="Fosun AI",
+                additional_queries=["复星 人工智能 产业布局"],
+                english_queries=["Fosun artificial intelligence strategy"],
             )
 
         self.assertEqual(results[0]["source"], "Reuters")
         self.assertTrue(any(item.get("language") == "en" for item in results))
         self.assertTrue(any("q=Fosun+AI" in url for url in requested_urls))
+        self.assertTrue(
+            any(
+                "q=%E5%A4%8D%E6%98%9F+%E4%BA%BA%E5%B7%A5%E6%99%BA%E8%83%BD+%E4%BA%A7%E4%B8%9A%E5%B8%83%E5%B1%80"
+                in url
+                for url in requested_urls
+            )
+        )
+        self.assertTrue(
+            any(
+                "q=Fosun+artificial+intelligence+strategy" in url
+                for url in requested_urls
+            )
+        )
 
     def test_resolves_each_candidate_once_inside_parallel_extraction(self) -> None:
         item = {

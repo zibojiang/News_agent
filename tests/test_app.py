@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 
+from agent import SEARCH_RELEVANCE_RULE_VERSION
 from database import load_last_search_state, save_last_search_state
 from quality_scorer import NEWS_QUALITY_RULE_VERSION
 
@@ -105,8 +106,15 @@ class AppSmokeTestCase(unittest.TestCase):
                             {
                                 "title": "当前规则评分新闻",
                                 "search_relevance_score": 88,
+                                "search_relevance_dimensions": {
+                                    "core_topic_match": 36,
+                                    "information_need_match": 27,
+                                    "semantic_coverage": 17,
+                                    "directness": 8,
+                                },
                                 "search_relevance_reason": "直接回答搜索问题",
                                 "search_relevance_scored": True,
+                                "search_relevance_rule_version": SEARCH_RELEVANCE_RULE_VERSION,
                                 "quality_pre": {
                                     "adjusted_score": 40,
                                     "dimension_scores": dimensions,
@@ -178,8 +186,15 @@ class AppSmokeTestCase(unittest.TestCase):
                             {
                                 "title": "基础评分细则测试新闻",
                                 "search_relevance_score": 76,
+                                "search_relevance_dimensions": {
+                                    "core_topic_match": 31,
+                                    "information_need_match": 23,
+                                    "semantic_coverage": 15,
+                                    "directness": 7,
+                                },
                                 "search_relevance_reason": "与搜索主题明显相关",
                                 "search_relevance_scored": True,
+                                "search_relevance_rule_version": SEARCH_RELEVANCE_RULE_VERSION,
                                 "quality_pre": {
                                     "total_score": 41,
                                     "adjusted_score": 41,
@@ -235,6 +250,9 @@ class AppSmokeTestCase(unittest.TestCase):
                 self.assertTrue(
                     any("时效性：4/5 分" in value for value in rendered_markdown)
                 )
+                self.assertTrue(
+                    any("核心主题匹配：31/40 分" in value for value in rendered_markdown)
+                )
 
     def test_cloud_demo_is_open_without_admin_password(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -267,8 +285,15 @@ class AppSmokeTestCase(unittest.TestCase):
                         "source": "测试媒体",
                         "published_at": "2026-07-29 10:00:00",
                         "search_relevance_score": 88,
+                        "search_relevance_dimensions": {
+                            "core_topic_match": 36,
+                            "information_need_match": 27,
+                            "semantic_coverage": 17,
+                            "directness": 8,
+                        },
                         "search_relevance_reason": "直接命中搜索主题",
                         "search_relevance_scored": True,
+                        "search_relevance_rule_version": SEARCH_RELEVANCE_RULE_VERSION,
                         "quality_pre": {
                             "adjusted_score": 40,
                             "total_score": 40,
@@ -340,6 +365,13 @@ class AppSmokeTestCase(unittest.TestCase):
                         "基础分 40/50 + AI 正文质量 45/50 = 综合质量 85/100"
                         in markdown.value
                         for markdown in app.markdown
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        "推荐分 = 搜索相关性 × 70% + 综合质量 × 30%"
+                        in caption.value
+                        for caption in app.caption
                     )
                 )
                 management_button = next(

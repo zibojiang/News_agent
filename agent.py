@@ -75,6 +75,16 @@ RETRY_BASE_DELAY = 2.0  # 秒，指数退避基数
 DEFAULT_MIN_SCORE = 70
 SEARCH_RELEVANCE_DISPLAY_THRESHOLD = 40
 BODY_ANALYSIS_RELEVANCE_THRESHOLD = 60
+SEARCH_RELEVANCE_RULE_VERSION = "r2"
+RECOMMENDATION_RELEVANCE_WEIGHT = 0.7
+RECOMMENDATION_QUALITY_WEIGHT = 0.3
+
+SEARCH_RELEVANCE_DIMENSION_MAXIMA = {
+    "core_topic_match": 40,
+    "information_need_match": 30,
+    "semantic_coverage": 20,
+    "directness": 10,
+}
 
 
 class SearchIntentSchema(BaseModel):
@@ -96,12 +106,54 @@ class SourceCredibilitySchema(BaseModel):
         description="新闻原始信息来源的权威度评分，0-25 分",
     )
     reason: str = Field(description="评分依据，说明发布者、域名和一手资料属性")
-    relevance_score: int = Field(
+    core_topic_match_score: int = Field(
         ge=0,
-        le=100,
-        description="新闻与用户搜索意图的相关性，0-100 分",
+        le=40,
+        description="新闻核心主体与搜索主题的匹配度，0-40 分",
+    )
+    information_need_match_score: int = Field(
+        ge=0,
+        le=30,
+        description="新闻是否回答用户具体想了解的问题，0-30 分",
+    )
+    semantic_coverage_score: int = Field(
+        ge=0,
+        le=20,
+        description="正文是否实质讨论相关内容而非仅命中词语，0-20 分",
+    )
+    directness_score: int = Field(
+        ge=0,
+        le=10,
+        description="搜索主题是新闻核心还是背景中顺带提及，0-10 分",
     )
     relevance_reason: str = Field(description="简短说明新闻命中或偏离了哪些搜索意图")
+
+    @property
+    def relevance_score(self) -> int:
+        """由代码汇总四个维度，避免 AI 总分与细则不一致。"""
+        return sum(self.relevance_dimension_scores().values())
+
+    def relevance_dimension_scores(self) -> dict[str, int]:
+        """返回稳定的相关性维度键名，供持久化与前端展示。"""
+        return {
+            "core_topic_match": self.core_topic_match_score,
+            "information_need_match": self.information_need_match_score,
+            "semantic_coverage": self.semantic_coverage_score,
+            "directness": self.directness_score,
+        }
+
+
+def calculate_recommendation_score(
+    relevance_score: int | float,
+    quality_score: int | float,
+) -> int:
+    """按“搜索体验优先”原则计算 0-100 推荐分。"""
+    relevance = max(0.0, min(100.0, float(relevance_score)))
+    quality = max(0.0, min(100.0, float(quality_score)))
+    return round(
+        relevance * RECOMMENDATION_RELEVANCE_WEIGHT
+        + quality * RECOMMENDATION_QUALITY_WEIGHT
+    )
 
 
 class BodyQualitySchema(BaseModel):
@@ -511,11 +563,13 @@ def analyze_search_intent(
 SOURCE_CREDIBILITY_SYSTEM_PROMPT = """你是一名新闻搜索初筛审查员。
 
 你需要独立完成两项评分：
-1. relevance_score（0-100）：新闻是否直接回答用户的搜索意图。不要因为只出现一两个相同词就给高分。
-   - 80-100：核心事件与搜索问题直接对应
-   - 60-79：明显相关，能提供部分有用答案
-   - 40-59：只有间接关系或主题偏离
-   - 0-39：基本无关、同词异义或无法回答问题
+1. 搜索相关性（0-100）：不要直接给总分，分别评估四个维度，总分由程序汇总。
+   - core_topic_match_score（0-40）：新闻核心主体是否就是用户搜索的行业、企业、事件或技术。
+   - information_need_match_score（0-30）：是否回答用户具体想了解的“新方向、市场、政策、案例”等问题。
+   - semantic_coverage_score（0-20）：正文是否实质讨论相关内容，不能因为只出现一两个相同词就给高分。
+   - directness_score（0-10）：搜索主题是新闻的核心，还是只在背景中顺带提及。
+   四维合计的解读：80-100 高度相关；60-79 明显相关；
+   40-59 间接相关；0-39 基本无关。
 2. score（0-25）：新闻原始信息来源的权威度。不分析正文写作质量。
 
 不要把 Google News、Bing、RSS 等聚合页当作原始发布者。结合提供的来源名、
@@ -555,7 +609,9 @@ def _build_source_credibility_prompt(
 【正文开头】
 {content_excerpt}
 
-请只输出 score、reason、relevance_score 和 relevance_reason 字段。"""
+请只输出 score、reason、core_topic_match_score、
+information_need_match_score、semantic_coverage_score、directness_score 和
+relevance_reason 字段。不要另外输出相关性总分。"""
 
 
 def analyze_source_credibility(
@@ -581,7 +637,7 @@ def analyze_source_credibility(
         original_query=original_query,
         search_intent=search_intent,
     )
-    last_error = "AI 未返回有效的来源权威度评分"
+    last_error = "AI 未返回有效的相关性与来源初筛结果"
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -644,7 +700,7 @@ def analyze_source_credibility(
                 raise ValueError("DeepSeek 返回空响应")
             return SourceCredibilitySchema.model_validate(json.loads(content))
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
-            last_error = f"来源权威度结构化输出无效（{type(exc).__name__}）"
+            last_error = f"相关性与来源初筛输出无效（{type(exc).__name__}）"
         except Exception as exc:
             if provider_name == "gemini":
                 last_error = _classify_gemini_error(exc, model_name)
@@ -653,7 +709,7 @@ def analyze_source_credibility(
         if attempt < MAX_RETRIES:
             time.sleep(RETRY_BASE_DELAY * (2 ** (attempt - 1)))
 
-    raise ArticleAnalysisError(f"来源权威度 AI 评分失败：{last_error}")
+    raise ArticleAnalysisError(f"相关性与来源 AI 初筛失败：{last_error}")
 
 
 def score_sources_with_ai(
@@ -713,8 +769,14 @@ def score_sources_with_ai(
                 apply_ai_source_score(pre_score, result.score, result.reason)
                 article["source_ai_scored"] = True
                 article["search_relevance_score"] = result.relevance_score
+                article["search_relevance_dimensions"] = (
+                    result.relevance_dimension_scores()
+                )
                 article["search_relevance_reason"] = result.relevance_reason
                 article["search_relevance_scored"] = True
+                article["search_relevance_rule_version"] = (
+                    SEARCH_RELEVANCE_RULE_VERSION
+                )
                 article.pop("source_ai_error", None)
             except Exception as exc:
                 reason = str(exc)
@@ -1526,8 +1588,9 @@ def run_pipeline(
                 article["source_ai_scored"] = True
             detail["quality_score"] = quality.adjusted_score
             detail["quality_label"] = quality.label
-            recommendation_score = round(
-                result.relevance_score * 0.6 + quality.adjusted_score * 0.4
+            recommendation_score = calculate_recommendation_score(
+                result.relevance_score,
+                quality.adjusted_score,
             )
             detail["recommendation_score"] = recommendation_score
 
@@ -1581,6 +1644,12 @@ def run_pipeline(
                     "search_relevance_score": result.relevance_score,
                     "search_relevance_reason": str(
                         article.get("search_relevance_reason", "")
+                    ),
+                    "search_relevance_dimensions": dict(
+                        article.get("search_relevance_dimensions", {}) or {}
+                    ),
+                    "search_relevance_rule_version": article.get(
+                        "search_relevance_rule_version", ""
                     ),
                     "recommendation_score": recommendation_score,
                 },
