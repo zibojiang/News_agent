@@ -27,6 +27,7 @@ from database import append_cases_batch_with_summary, load_topics, record_task_r
 from quality_scorer import (
     NEWS_QUALITY_RULE_VERSION,
     QualitySummary,
+    apply_ai_source_score,
     enrich_with_ai_result,
     score_article_pre_ai,
 )
@@ -72,6 +73,17 @@ RETRY_BASE_DELAY = 2.0  # 秒，指数退避基数
 
 # 定时任务默认相关性分数门槛
 DEFAULT_MIN_SCORE = 70
+
+
+class SourceCredibilitySchema(BaseModel):
+    """AI 对新闻原始信息来源的独立评分。"""
+
+    score: int = Field(
+        ge=0,
+        le=25,
+        description="新闻原始信息来源的权威度评分，0-25 分",
+    )
+    reason: str = Field(description="评分依据，说明发布者、域名和一手资料属性")
 
 
 class BodyQualitySchema(BaseModel):

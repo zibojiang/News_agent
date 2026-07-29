@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # 评分规则版本 — 变更时触发重新评分
 # ============================================================
-NEWS_QUALITY_RULE_VERSION = "v7"
+NEWS_QUALITY_RULE_VERSION = "v8"
 
 # ============================================================
 # 来源权威度配置（独立存放，便于扩展）
@@ -406,6 +406,7 @@ class QualitySummary:
     label: str = ""
     label_description: str = ""
     ai_confidence: float | None = None
+    source_score_method: str = "rule"
     score_cap: int = 100
     quality_warnings: list[str] = field(default_factory=list)
 
@@ -470,6 +471,26 @@ def score_article_pre_ai(
     )
 
 
+def apply_ai_source_score(
+    summary: QualitySummary,
+    score: int | float,
+    reason: str,
+) -> QualitySummary:
+    """用 AI 的 0-25 来源评分替换规则预估，并重算基础分。"""
+    bounded_score = max(0, min(25, int(round(score))))
+    summary.dimension_scores["source_credibility"] = bounded_score
+    summary.dimension_reasons["source_credibility"] = (
+        f"AI 评估：{reason.strip() or '未提供具体依据'}"
+    )
+    summary.source_score_method = "ai"
+    summary.total_score = sum(summary.dimension_scores.values())
+    summary.label = "预筛"
+    summary.label_description = (
+        "来源权威度已由 AI 评估；正文分析完成后生成 100 分综合质量分"
+    )
+    return summary
+
+
 def enrich_with_ai_result(
     summary: QualitySummary,
     ai_result: dict[str, Any] | None,
@@ -493,13 +514,11 @@ def enrich_with_ai_result(
     # AI 完成后覆盖预筛阶段的来源规则分，该维度仍最多 25 分。
     source_score = ai_result.get("sourceCredibilityScore")
     if isinstance(source_score, (int, float)) and not isinstance(source_score, bool):
-        source_score = max(0, min(25, int(round(source_score))))
         source_reason = str(
             ai_result.get("sourceCredibilityReason")
             or "AI 根据原始发布者与官网信息评估"
         )
-        summary.dimension_scores["source_credibility"] = source_score
-        summary.dimension_reasons["source_credibility"] = f"AI 评估：{source_reason}"
+        apply_ai_source_score(summary, source_score, source_reason)
 
     body_quality = ai_result.get("bodyQuality")
     body_score_total = 0
