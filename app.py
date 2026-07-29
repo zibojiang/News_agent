@@ -38,8 +38,10 @@ from database import (
     get_scheduler_health,
     initialize_database,
     load_cases,
+    load_last_search_state,
     load_task_runs,
     load_topics,
+    save_last_search_state,
     update_case_review_status,
     update_topic,
 )
@@ -400,6 +402,107 @@ def _render_score_breakdown(quality_details: dict) -> None:
         st.caption(f"⚠️ 扣分 {penalty.get('deduction', 0)}：{penalty.get('reason', '')}")
 
 
+def _quality_value(quality: Any, key: str, default: Any = None) -> Any:
+    """同时兼容运行时 QualitySummary 和数据库恢复后的字典。"""
+    if isinstance(quality, dict):
+        return quality.get(key, default)
+    return getattr(quality, key, default)
+
+
+def _quality_state(quality: Any) -> dict[str, Any]:
+    """将预筛评分精简为可持久化字典。"""
+    penalties = []
+    for penalty in _quality_value(quality, "penalties", []) or []:
+        penalties.append(
+            {
+                "reason": _quality_value(penalty, "reason", ""),
+                "deduction": _quality_value(penalty, "deduction", 0),
+            }
+        )
+    return {
+        "total_score": _quality_value(quality, "total_score", 0),
+        "adjusted_score": _quality_value(quality, "adjusted_score", 0),
+        "dimension_scores": dict(
+            _quality_value(quality, "dimension_scores", {}) or {}
+        ),
+        "dimension_reasons": dict(
+            _quality_value(quality, "dimension_reasons", {}) or {}
+        ),
+        "penalties": penalties,
+        "label": _quality_value(quality, "label", ""),
+    }
+
+
+def _persist_latest_search(
+    keyword: str,
+    articles: list[dict[str, Any]],
+    results: dict[int, dict[str, Any]] | None = None,
+    run_summary: dict[str, Any] | None = None,
+) -> None:
+    """保存恢复卡片所需的最小状态，不重复保存整篇正文。"""
+    stored_articles = []
+    for article in articles:
+        stored_articles.append(
+            {
+                "title": str(article.get("title", "")),
+                "url": str(article.get("url", "")),
+                "source": str(article.get("source", "")),
+                "published_at": str(article.get("published_at", "")),
+                "language": str(article.get("language", "zh")),
+                "content": str(article.get("content", ""))[:500],
+                "quality_pre": _quality_state(article.get("quality_pre")),
+            }
+        )
+    summary_state = {
+        key: value
+        for key, value in (run_summary or {}).items()
+        if key != "cases"
+    }
+    state = {
+        "keyword": keyword,
+        "articles": stored_articles,
+        "results": results or {},
+        "run_summary": summary_state,
+    }
+    try:
+        save_last_search_state(state)
+    except Exception as exc:
+        logger.warning("保存最近搜索状态失败: %s", type(exc).__name__)
+
+
+def _restore_latest_search() -> None:
+    """在新 Streamlit 会话中恢复最近一次搜索卡片。"""
+    if st.session_state.get("latest_search_restored"):
+        return
+    st.session_state.latest_search_restored = True
+    if st.session_state.get("fetched_articles"):
+        return
+    try:
+        state = load_last_search_state()
+    except Exception as exc:
+        logger.warning("读取最近搜索状态失败: %s", type(exc).__name__)
+        return
+    if not state or not isinstance(state.get("articles"), list):
+        return
+    articles = state.get("articles", [])
+    if not articles:
+        return
+    raw_results = state.get("results", {})
+    results = {
+        int(index): detail
+        for index, detail in raw_results.items()
+        if str(index).isdigit() and isinstance(detail, dict)
+    } if isinstance(raw_results, dict) else {}
+    keyword = str(state.get("keyword", ""))
+    st.session_state.fetched_articles = articles
+    st.session_state.fetched_keyword = keyword
+    st.session_state.last_search_keyword = keyword
+    if results:
+        st.session_state.fetched_results = results
+    if isinstance(state.get("run_summary"), dict) and state["run_summary"]:
+        st.session_state.last_run_summary = state["run_summary"]
+
+
 def _render_article_cards(
     articles: list[dict],
     keyword: str,
@@ -416,7 +519,7 @@ def _render_article_cards(
         return
 
     total_pre_score = sum(
-        a.get("quality_pre", type("obj", (), {"adjusted_score": 0})()).adjusted_score
+        int(_quality_value(a.get("quality_pre"), "adjusted_score", 0) or 0)
         for a in articles
     )
     analyzed_count = len(results) if results else 0
@@ -436,13 +539,14 @@ def _render_article_cards(
 
     for idx, article in enumerate(articles):
         pre = article.get("quality_pre")
-        pre_score = pre.adjusted_score if hasattr(pre, "adjusted_score") else (
-            pre.total_score if hasattr(pre, "total_score") else 0
+        pre_score = int(
+            _quality_value(
+                pre,
+                "adjusted_score",
+                _quality_value(pre, "total_score", 0),
+            ) or 0
         )
-        if hasattr(pre, "dimension_scores"):
-            pre_dims = dict(pre.dimension_scores)
-        else:
-            pre_dims = {}
+        pre_dims = dict(_quality_value(pre, "dimension_scores", {}) or {})
 
         result = (results or {}).get(idx)
         title = article.get("title", "无标题")
@@ -511,20 +615,16 @@ def _render_article_cards(
                         st.caption(f"判定理由：{reason}")
             elif not result:
                 with st.expander(f"⭐ 查看评分依据｜预筛 {pre_score}分"):
-                    if hasattr(pre, "dimension_scores") and pre.dimension_scores:
+                    if pre_dims:
                         _render_score_breakdown({
-                            "total_score": pre.total_score if hasattr(pre, "total_score") else pre_score,
+                            "total_score": _quality_value(pre, "total_score", pre_score),
                             "adjusted_score": pre_score,
                             "dimension_scores": pre_dims,
-                            "dimension_reasons": (
-                                dict(pre.dimension_reasons)
-                                if hasattr(pre, "dimension_reasons") else {}
+                            "dimension_reasons": dict(
+                                _quality_value(pre, "dimension_reasons", {}) or {}
                             ),
-                            "penalties": [
-                                {"reason": p.reason, "deduction": p.deduction}
-                                for p in (pre.penalties if hasattr(pre, "penalties") else [])
-                            ],
-                            "label": pre.label if hasattr(pre, "label") else "",
+                            "penalties": _quality_state(pre)["penalties"],
+                            "label": _quality_value(pre, "label", ""),
                         })
                     else:
                         st.caption("暂无评分明细")
@@ -818,6 +918,7 @@ def _render_task_center(cloud_demo: bool) -> None:
 
 
 def _render_search_page(cloud_demo: bool) -> None:
+    _restore_latest_search()
     _, action_col = st.columns([12, 1])
     with action_col:
         st.button(
@@ -924,6 +1025,7 @@ def _render_search_page(cloud_demo: bool) -> None:
             if articles:
                 st.session_state.fetched_articles = articles
                 st.session_state.fetched_keyword = keyword
+                _persist_latest_search(keyword, articles)
                 st.session_state.pending_analysis = {
                     "keyword": keyword,
                     "min_score": int(min_score),
@@ -964,10 +1066,17 @@ def _render_search_page(cloud_demo: bool) -> None:
                 run_summary["search_seconds"] = pending_analysis["search_seconds"]
                 run_summary["analysis_seconds"] = perf_counter() - analysis_started
                 st.session_state.last_run_summary = run_summary
-                st.session_state.fetched_results = {
+                result_map = {
                     index: detail
                     for index, detail in enumerate(run_summary.get("details", []))
                 }
+                st.session_state.fetched_results = result_map
+                _persist_latest_search(
+                    pending_analysis["keyword"],
+                    articles,
+                    result_map,
+                    run_summary,
+                )
                 progress_bar.progress(1.0, text="分析完成")
                 st.rerun()
             except ValueError as exc:

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DATABASE_PATH = "data/industry_news.db"
 DEFAULT_TOPICS_XLSX = PROJECT_ROOT / "复星旅文DeepResearch研究主题目录_更新版_V4.xlsx"
+LAST_SEARCH_STATE_KEY = "latest_search_cards"
 
 JSON_COLUMNS = [
     "bullet_points",
@@ -607,6 +608,38 @@ def set_system_state(key: str, value: str, db_path: str | None = None) -> None:
             (key, value, _now()),
         )
         connection.commit()
+
+
+def get_system_state(key: str, db_path: str | None = None) -> str | None:
+    """读取轻量系统状态。"""
+    path = initialize_database(db_path)
+    with _connect(path) as connection:
+        row = connection.execute(
+            "SELECT state_value FROM system_state WHERE state_key = ?",
+            (key,),
+        ).fetchone()
+    return str(row["state_value"]) if row else None
+
+
+def save_last_search_state(
+    state: dict[str, Any], db_path: str | None = None
+) -> None:
+    """保存最近一次搜索卡片状态，用于页面刷新后恢复。"""
+    payload = json.dumps(state, ensure_ascii=False, default=str)
+    set_system_state(LAST_SEARCH_STATE_KEY, payload, db_path=db_path)
+
+
+def load_last_search_state(db_path: str | None = None) -> dict[str, Any] | None:
+    """读取最近一次搜索卡片状态，损坏数据安全忽略。"""
+    raw = get_system_state(LAST_SEARCH_STATE_KEY, db_path=db_path)
+    if not raw:
+        return None
+    try:
+        state = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("最近搜索状态无法解析，已忽略")
+        return None
+    return state if isinstance(state, dict) else None
 
 
 def get_scheduler_health(db_path: str | None = None, stale_seconds: int = 180) -> dict[str, Any]:

@@ -11,9 +11,12 @@ from database import (
     get_last_run_time,
     initialize_database,
     load_cases,
+    load_last_search_state,
     load_task_runs,
     load_topics,
     record_task_run,
+    save_last_search_state,
+    set_system_state,
     update_case_review_status,
 )
 
@@ -148,6 +151,18 @@ class DatabaseTestCase(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs.iloc[0]["status"], "success")
         self.assertIsNotNone(get_last_run_time("S1.1"))
+
+    def test_last_search_state_round_trip_and_invalid_json(self) -> None:
+        state = {
+            "keyword": "复星AI",
+            "articles": [{"title": "测试新闻"}],
+            "results": {"0": {"score": 88}},
+        }
+        save_last_search_state(state)
+        self.assertEqual(load_last_search_state(), state)
+
+        set_system_state("latest_search_cards", "not-json")
+        self.assertIsNone(load_last_search_state())
 
 
 if __name__ == "__main__":

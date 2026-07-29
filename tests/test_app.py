@@ -8,11 +8,72 @@ from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 
+from database import save_last_search_state
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class AppSmokeTestCase(unittest.TestCase):
+    def test_restores_latest_cards_in_a_new_streamlit_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = str(Path(temp_dir) / "industry_news.db")
+            with patch.dict(
+                os.environ,
+                {
+                    "DATABASE_PATH": database_path,
+                    "DEPLOYMENT_MODE": "cloud_demo",
+                    "ADMIN_PASSWORD": "",
+                },
+            ):
+                save_last_search_state(
+                    {
+                        "keyword": "复星AI",
+                        "articles": [
+                            {
+                                "title": "刷新后仍然展示的新闻",
+                                "url": "https://example.com/news",
+                                "source": "Deloitte",
+                                "published_at": "2026-07-29 10:00:00",
+                                "language": "en",
+                                "content": "",
+                                "quality_pre": {
+                                    "adjusted_score": 80,
+                                    "total_score": 80,
+                                    "dimension_scores": {"source_credibility": 24},
+                                    "dimension_reasons": {},
+                                    "penalties": [],
+                                    "label": "良好",
+                                },
+                            }
+                        ],
+                        "results": {
+                            "0": {
+                                "analysis_status": "成功",
+                                "storage_status": "已新增",
+                                "score": 95,
+                                "summary": "刷新后恢复的 AI 摘要。",
+                                "quality_score": 80,
+                                "quality_label": "良好",
+                                "quality_details": {},
+                            }
+                        },
+                        "run_summary": {},
+                    }
+                )
+
+                app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+                self.assertEqual(list(app.exception), [])
+                self.assertTrue(
+                    any(
+                        "刷新后仍然展示的新闻" in markdown.value
+                        for markdown in app.markdown
+                    )
+                )
+                self.assertTrue(
+                    any("刷新后恢复的 AI 摘要" in markdown.value for markdown in app.markdown)
+                )
+
     def test_cloud_demo_is_open_without_admin_password(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = str(Path(temp_dir) / "industry_news.db")
