@@ -169,16 +169,8 @@ st.markdown(
     }
     .search-form-title {color: var(--ink); font-size: 1.28rem; font-weight: 800; margin-bottom: .15rem;}
     .search-form-note {color: var(--muted); font-size: .9rem; margin-bottom: .85rem;}
-    .search-examples {display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; margin: .45rem 0 .2rem;}
-    .search-examples strong {color: #475467; font-size: .82rem; margin-right: .1rem;}
-    .search-examples span {
-        color: #3156b8;
-        font-size: .8rem;
-        padding: .28rem .58rem;
-        border-radius: 999px;
-        background: var(--brand-soft);
-        border: 1px solid #d7e2ff;
-    }
+    .search-examples {color: #667085; font-size: .82rem; line-height: 1.6; margin: .45rem 0 .2rem;}
+    .search-examples strong {color: #475467;}
     [data-testid="stSidebar"] {border-right: 1px solid var(--line);}
     div[data-testid="stExpander"] {border-color: var(--line); border-radius: 12px;}
     .footer-note {color: #98a2b3; font-size: .78rem; text-align: center; margin-top: 2rem;}
@@ -828,10 +820,7 @@ def _render_search_page(cloud_demo: bool) -> None:
         st.markdown(
             """
             <div class="search-examples">
-                <strong>搜索示例</strong>
-                <span>半导体产业研报</span>
-                <span>AI行业应用，商业化ROI</span>
-                <span>AI市场份额，竞争格局</span>
+                <strong>搜索示例：</strong>半导体产业研报 · AI 行业应用与商业化 ROI · AI 市场份额与竞争格局
             </div>
             """,
             unsafe_allow_html=True,

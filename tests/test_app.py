@@ -34,7 +34,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     any("搜索新闻" in markdown.value for markdown in app.markdown)
                 )
                 self.assertTrue(
-                    any("复星旅文最新动态" in markdown.value for markdown in app.markdown)
+                    any("半导体产业研报" in markdown.value for markdown in app.markdown)
                 )
 
                 management_button = next(
