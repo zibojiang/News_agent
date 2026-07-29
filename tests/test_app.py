@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class AppSmokeTestCase(unittest.TestCase):
-    def test_cloud_demo_renders_without_exception(self) -> None:
+    def test_cloud_demo_is_open_without_admin_password(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = str(Path(temp_dir) / "industry_news.db")
             with patch.dict(
@@ -21,12 +21,24 @@ class AppSmokeTestCase(unittest.TestCase):
                 {
                     "DATABASE_PATH": database_path,
                     "DEPLOYMENT_MODE": "cloud_demo",
-                    "ADMIN_PASSWORD": "test-admin-password",
+                    "ADMIN_PASSWORD": "",
                 },
             ):
                 app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+                self.assertEqual(list(app.exception), [])
+                button_labels = [button.label for button in app.button]
+                self.assertIn("搜索并分析", button_labels)
+                self.assertIn("⚙️", button_labels)
+                self.assertNotIn("解锁管理操作", button_labels)
 
-        self.assertEqual(list(app.exception), [])
+                management_button = next(
+                    button for button in app.button if button.label == "⚙️"
+                )
+                management_button.click().run(timeout=20)
+                self.assertEqual(list(app.exception), [])
+                self.assertTrue(
+                    any("管理台" in markdown.value for markdown in app.markdown)
+                )
 
 
 if __name__ == "__main__":

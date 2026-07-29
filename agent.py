@@ -684,6 +684,7 @@ def run_pipeline(
     topic: dict[str, Any] | None = None,
     trigger_type: str = "manual",
     progress_callback: Callable[[str, float], None] | None = None,
+    pre_fetched_articles: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     执行完整的「抓取 → 提炼 → 入库」工作流。

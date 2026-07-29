@@ -135,6 +135,19 @@ class AgentEvidenceTestCase(unittest.TestCase):
         self.assertEqual(summary["status"], "failed")
         self.assertIn("OpenAI 配额不足", summary["errors"][0])
 
+    def test_pipeline_accepts_pre_fetched_articles(self) -> None:
+        with (
+            patch("agent.fetch_and_extract_batch") as fetch_batch,
+            patch("agent.record_task_run", return_value=1),
+        ):
+            summary = run_pipeline(
+                "酒店营收",
+                pre_fetched_articles=[],
+            )
+
+        fetch_batch.assert_not_called()
+        self.assertEqual(summary["processed"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
