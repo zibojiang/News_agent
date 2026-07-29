@@ -805,6 +805,9 @@ def _render_article_cards(
                         )
                         label = result.get("quality_label", "")
                         st.metric("综合质量", f"{quality}/100", label)
+                    elif has_current_pre_score:
+                        st.metric("基础分", f"{pre_score}/50")
+                        st.caption("正文 AI 分析未完成，保留基础评分")
                     status = result.get("analysis_status", "?")
                     store = result.get("storage_status", "?")
                     st.caption(f"AI: {status} | 写入: {store}")
@@ -841,25 +844,10 @@ def _render_article_cards(
                     reason = result.get("reason", "")
                     if reason:
                         st.caption(f"判定理由：{reason}")
-            elif not result and has_current_pre_score:
+            elif has_current_pre_score:
                 with st.expander(f"⭐ 查看基础评分｜{pre_score}/50"):
                     if pre_dims:
-                        _render_score_breakdown({
-                            "total_score": _quality_value(pre, "total_score", pre_score),
-                            "adjusted_score": pre_score,
-                            "dimension_scores": pre_dims,
-                            "dimension_reasons": dict(
-                                _quality_value(pre, "dimension_reasons", {}) or {}
-                            ),
-                            "penalties": _quality_state(pre)["penalties"],
-                            "label": _quality_value(pre, "label", ""),
-                            "rule_version": _quality_value(
-                                pre, "rule_version", ""
-                            ),
-                            "quality_warnings": _quality_value(
-                                pre, "quality_warnings", []
-                            ),
-                        })
+                        _render_score_breakdown(pre_state)
                     else:
                         st.caption("暂无评分明细")
 

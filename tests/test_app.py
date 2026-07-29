@@ -156,6 +156,79 @@ class AppSmokeTestCase(unittest.TestCase):
                     )
                 )
 
+    def test_base_score_expander_keeps_ai_source_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = str(Path(temp_dir) / "industry_news.db")
+            with patch.dict(
+                os.environ,
+                {
+                    "DATABASE_PATH": database_path,
+                    "DEPLOYMENT_MODE": "cloud_demo",
+                    "ADMIN_PASSWORD": "",
+                },
+            ):
+                save_last_search_state(
+                    {
+                        "keyword": "复星AI",
+                        "articles": [
+                            {
+                                "title": "基础评分细则测试新闻",
+                                "quality_pre": {
+                                    "total_score": 41,
+                                    "adjusted_score": 41,
+                                    "dimension_scores": {
+                                        "source_credibility": 21,
+                                        "content_density": 8,
+                                        "data_richness": 8,
+                                        "freshness": 4,
+                                    },
+                                    "dimension_reasons": {
+                                        "source_credibility": "AI 评估：主流媒体",
+                                        "content_density": "正文结构完整",
+                                        "data_richness": "含多项量化数据",
+                                        "freshness": "2-4 个月内发布",
+                                    },
+                                    "penalties": [],
+                                    "label": "预筛",
+                                    "rule_version": NEWS_QUALITY_RULE_VERSION,
+                                    "source_score_method": "ai",
+                                },
+                            }
+                        ],
+                        "results": {
+                            "0": {
+                                "analysis_status": "失败",
+                                "storage_status": "未写入",
+                                "score": 0,
+                                "reason": "正文 AI 暂时失败",
+                            }
+                        },
+                        "run_summary": {},
+                    }
+                )
+
+                app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+                self.assertEqual(list(app.exception), [])
+                self.assertTrue(
+                    any(
+                        "查看基础评分｜41/50" in expander.label
+                        for expander in app.expander
+                    )
+                )
+                rendered_markdown = [item.value for item in app.markdown]
+                self.assertTrue(
+                    any("来源权威度（AI 评分）：21/25 分" in value for value in rendered_markdown)
+                )
+                self.assertTrue(
+                    any("信息密度：8/10 分" in value for value in rendered_markdown)
+                )
+                self.assertTrue(
+                    any("数据含量：8/10 分" in value for value in rendered_markdown)
+                )
+                self.assertTrue(
+                    any("时效性：4/5 分" in value for value in rendered_markdown)
+                )
+
     def test_cloud_demo_is_open_without_admin_password(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = str(Path(temp_dir) / "industry_news.db")
