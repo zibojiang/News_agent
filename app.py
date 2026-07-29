@@ -655,7 +655,16 @@ def _render_article_cards(
             summary_parts.append(f"{legacy_count} 篇旧版评分待更新")
         st.caption(" · ".join(summary_parts))
     else:
-        st.caption("新闻已搜索到，可以先浏览标题和原文；AI 分析会在后台继续。")
+        if len(current_pre_scores) == len(articles):
+            st.caption(
+                "来源权威度 AI 评分已完成，基础分已生成；"
+                "正文质量分析会继续进行。"
+            )
+        else:
+            st.caption(
+                "新闻已搜索到，可以先浏览标题和原文；"
+                "AI 将先评估来源权威度，再生成基础分。"
+            )
 
     for idx, article in enumerate(articles):
         pre = article.get("quality_pre")

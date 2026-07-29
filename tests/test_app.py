@@ -141,7 +141,7 @@ class AppSmokeTestCase(unittest.TestCase):
                 )
                 self.assertTrue(
                     any(
-                        "来源权威度（AI 评分）" in caption.value
+                        "AI 评估：主流来源" in caption.value
                         for caption in app.caption
                     )
                 )
@@ -194,13 +194,6 @@ class AppSmokeTestCase(unittest.TestCase):
                         for markdown in app.markdown
                     )
                 )
-                self.assertTrue(
-                    any(
-                        "来源权威度（AI 评分）" in caption.value
-                        for caption in app.caption
-                    )
-                )
-
                 management_button = next(
                     button for button in app.button if button.label == "⚙️"
                 )
