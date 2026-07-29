@@ -16,13 +16,14 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 # ============================================================
 # 评分规则版本 — 变更时触发重新评分
 # ============================================================
-NEWS_QUALITY_RULE_VERSION = "v2"
+NEWS_QUALITY_RULE_VERSION = "v3"
 
 # ============================================================
 # 来源权威度配置（独立存放，便于扩展）
@@ -55,9 +56,52 @@ TIER3_SOURCES: dict[str, int] = {
     "百度新闻": 5, "搜狗新闻": 5, "今日头条": 7, "一点资讯": 5,
 }
 
-# 域名辅助判断
-GOV_DOMAIN_BONUS = 3      # .gov.cn 域名加分
-EDU_DOMAIN_BONUS = 2      # .edu.cn 域名加分
+# 权威研究、咨询和公共机构：对其官方报告给予一手来源评分。
+RESEARCH_INSTITUTIONS: dict[str, int] = {
+    "Deloitte": 24, "McKinsey": 24, "Boston Consulting Group": 23,
+    "BCG": 23, "PwC": 23, "KPMG": 23, "Ernst & Young": 23,
+    "Accenture": 22, "Gartner": 22, "IDC": 22, "Forrester": 21,
+}
+
+PUBLIC_INSTITUTIONS: dict[str, int] = {
+    "OECD": 25, "World Bank": 25, "International Monetary Fund": 25,
+    "IMF": 25, "United Nations": 25, "World Economic Forum": 23,
+}
+
+# 域名规则与来源名规则同时工作；即使 RSS 来源名缺失，也能识别官网。
+SOURCE_DOMAIN_PROFILES: dict[str, tuple[int, str]] = {
+    # 国际权威媒体
+    "reuters.com": (25, "国际权威媒体官网"),
+    "apnews.com": (25, "国际权威媒体官网"),
+    "bbc.com": (24, "国际权威媒体官网"),
+    "bbc.co.uk": (24, "国际权威媒体官网"),
+    "bloomberg.com": (24, "国际权威媒体官网"),
+    "ft.com": (24, "国际权威媒体官网"),
+    "wsj.com": (24, "国际权威媒体官网"),
+    "nytimes.com": (23, "国际权威媒体官网"),
+    "cnbc.com": (22, "国际主流媒体官网"),
+    # 权威研究与咨询机构
+    "deloitte.com": (24, "权威研究/咨询机构官网"),
+    "mckinsey.com": (24, "权威研究/咨询机构官网"),
+    "bcg.com": (23, "权威研究/咨询机构官网"),
+    "pwc.com": (23, "权威研究/咨询机构官网"),
+    "kpmg.com": (23, "权威研究/咨询机构官网"),
+    "ey.com": (23, "权威研究/咨询机构官网"),
+    "accenture.com": (22, "权威研究/咨询机构官网"),
+    "gartner.com": (22, "专业研究机构官网"),
+    "idc.com": (22, "专业研究机构官网"),
+    "forrester.com": (21, "专业研究机构官网"),
+    # 多边与公共机构
+    "oecd.org": (25, "国际公共机构官网"),
+    "worldbank.org": (25, "国际公共机构官网"),
+    "imf.org": (25, "国际公共机构官网"),
+    "un.org": (25, "国际公共机构官网"),
+    "weforum.org": (23, "国际研究/公共机构官网"),
+}
+
+# 通用域名评分和扣分
+GOV_DOMAIN_SCORE = 25
+EDU_DOMAIN_SCORE = 22
 BLOG_DOMAIN_PENALTY = -3  # blog.* / *.wordpress.* 降分
 AGGREGATOR_DOMAIN_PENALTY = -2  # rss.app 等聚合域名降分
 
@@ -68,56 +112,46 @@ DEFAULT_SOURCE_SCORE = 10
 def compute_source_credibility(source: str, url: str) -> tuple[int, str]:
     """计算来源权威度分数（0-25），返回 (分数, 评级理由)。"""
     source_clean = source.strip()
-    reasons: list[str] = []
-    score = DEFAULT_SOURCE_SCORE
+    domain = _extract_domain(url).lower()
+    candidates: list[tuple[int, str]] = []
 
-    # 精确匹配已知来源
-    for tier_sources, tier_score_base in [
-        (TIER1_SOURCES, None),
-        (TIER2_SOURCES, None),
-        (TIER3_SOURCES, None),
-    ]:
-        if tier_sources is TIER1_SOURCES:
-            for name, s in TIER1_SOURCES.items():
-                if name.casefold() in source_clean.casefold():
-                    score = s
-                    reasons.append(f"一级媒体：{name}")
-                    break
-        elif tier_sources is TIER2_SOURCES:
-            for name, s in TIER2_SOURCES.items():
-                if name.casefold() in source_clean.casefold():
-                    score = s
-                    reasons.append(f"二级媒体：{name}")
-                    break
-        elif tier_sources is TIER3_SOURCES:
-            for name, s in TIER3_SOURCES.items():
-                if name.casefold() in source_clean.casefold():
-                    score = s
-                    reasons.append(f"聚合/平台来源：{name}")
-                    break
-        if reasons and tier_sources is TIER1_SOURCES:
-            break
-        if reasons:
-            break
+    source_groups = (
+        ("权威研究/咨询机构", RESEARCH_INSTITUTIONS),
+        ("国际公共机构", PUBLIC_INSTITUTIONS),
+        ("一级媒体", TIER1_SOURCES),
+        ("二级媒体", TIER2_SOURCES),
+        ("聚合/平台来源", TIER3_SOURCES),
+    )
+    for category, sources in source_groups:
+        for name, candidate_score in sources.items():
+            if _source_name_matches(source_clean, name):
+                candidates.append((candidate_score, f"{category}：{name}"))
 
-    # 域名辅助判断
-    if url:
-        domain = _extract_domain(url).lower()
-        if any(tld in domain for tld in (".gov.cn",)):
-            score = min(25, score + GOV_DOMAIN_BONUS)
-            reasons.append("政府域名 +3")
-        if any(tld in domain for tld in (".edu.cn",)):
-            score = min(25, score + EDU_DOMAIN_BONUS)
-            reasons.append("教育域名 +2")
-        if any(kw in domain for kw in ("blog", "wordpress", "zhihu.com/people", "weixin.qq.com")):
-            score = max(0, score + BLOG_DOMAIN_PENALTY)
-            reasons.append("个人/自媒体域名 -3")
-        if any(kw in domain for kw in ("rss.app", "news.google.com", "newsnow", "feed")):
-            score = max(0, score + AGGREGATOR_DOMAIN_PENALTY)
-            reasons.append("聚合域名 -2")
+    for known_domain, (candidate_score, category) in SOURCE_DOMAIN_PROFILES.items():
+        if _domain_matches(domain, known_domain):
+            candidates.append((candidate_score, f"{category}：{known_domain}"))
 
-    if not reasons:
-        reasons.append("未知来源，使用中性基础分")
+    domain_parts = set(domain.split("."))
+    if domain and domain_parts.intersection({"gov", "govt", "gouv"}):
+        candidates.append((GOV_DOMAIN_SCORE, "政府域名/公共机构官网"))
+    if domain and (
+        "edu" in domain_parts or re.search(r"\.ac\.[a-z]{2}$", domain)
+    ):
+        candidates.append((EDU_DOMAIN_SCORE, "教育/学术机构域名"))
+
+    if candidates:
+        score, primary_reason = max(candidates, key=lambda item: item[0])
+        reasons = [primary_reason]
+    else:
+        score = DEFAULT_SOURCE_SCORE
+        reasons = ["未知来源，使用中性基础分"]
+
+    if any(kw in domain for kw in ("blog", "wordpress", "zhihu.com", "weixin.qq.com")):
+        score += BLOG_DOMAIN_PENALTY
+        reasons.append("个人/自媒体域名 -3")
+    if any(kw in domain for kw in ("rss.app", "news.google.com", "newsnow", "feed")):
+        score += AGGREGATOR_DOMAIN_PENALTY
+        reasons.append("聚合域名 -2")
 
     return max(0, min(25, score)), "; ".join(reasons)
 
@@ -513,8 +547,25 @@ def make_quality_cache_key(content_hash: str) -> str:
 
 def _extract_domain(url: str) -> str:
     """从 URL 提取域名。"""
-    match = re.search(r"https?://([^/]+)", url)
-    return match.group(1) if match else ""
+    try:
+        return urlparse(url).hostname or ""
+    except ValueError:
+        return ""
+
+
+def _domain_matches(domain: str, known_domain: str) -> bool:
+    """严格匹配主域名或其子域名，避免伪造域名误命中。"""
+    return domain == known_domain or domain.endswith(f".{known_domain}")
+
+
+def _source_name_matches(source: str, known_name: str) -> bool:
+    """中文名称按包含匹配，英文缩写按完整单词匹配。"""
+    if not source or not known_name:
+        return False
+    if re.search(r"[A-Za-z]", known_name):
+        pattern = rf"(?<![a-z0-9]){re.escape(known_name.casefold())}(?![a-z0-9])"
+        return re.search(pattern, source.casefold()) is not None
+    return known_name in source
 
 
 def _parse_datetime(date_str: str) -> datetime | None:

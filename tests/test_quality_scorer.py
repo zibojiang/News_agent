@@ -32,6 +32,30 @@ class TestSourceCredibility(unittest.TestCase):
         self.assertEqual(score, 25)
         self.assertIn("Reuters", reason)
 
+    def test_research_institution_official_report(self):
+        score, reason = compute_source_credibility(
+            "Deloitte",
+            "https://www.deloitte.com/global/en/issues/generative-ai/report.html",
+        )
+        self.assertEqual(score, 24)
+        self.assertIn("权威研究/咨询机构", reason)
+
+    def test_known_official_domain_works_when_source_name_is_missing(self):
+        score, reason = compute_source_credibility(
+            "未知来源",
+            "https://insights.deloitte.com/report/ai",
+        )
+        self.assertEqual(score, 24)
+        self.assertIn("deloitte.com", reason)
+
+    def test_lookalike_domain_does_not_gain_official_score(self):
+        score, reason = compute_source_credibility(
+            "未知来源",
+            "https://fake-deloitte.com/report/ai",
+        )
+        self.assertEqual(score, 10)
+        self.assertIn("中性基础分", reason)
+
     def test_unknown_source(self):
         score, reason = compute_source_credibility("未知小站", "https://example.com")
         self.assertGreaterEqual(score, 0)
