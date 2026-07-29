@@ -10,6 +10,7 @@ from agent import (
     ArticleAnalysisError,
     BodyQualitySchema,
     NewsCaseSchema,
+    SourceCredibilitySchema,
     _keep_verifiable_evidence,
     analyze_article,
     analyze_article_with_chat_completions,
@@ -18,6 +19,7 @@ from agent import (
     get_gemini_model,
     get_openai_model,
     run_pipeline,
+    score_sources_with_ai,
 )
 
 
@@ -104,6 +106,29 @@ class AgentEvidenceTestCase(unittest.TestCase):
         self.assertEqual(
             request["extra_body"], {"thinking": {"type": "disabled"}}
         )
+
+    def test_source_ai_score_is_applied_before_body_analysis(self) -> None:
+        article = {
+            "title": "测试新闻",
+            "url": "https://example.com/news/1",
+            "content": "测试正文",
+            "source": "测试媒体",
+            "published_at": "2026-07-29 10:00:00",
+        }
+        with patch(
+            "agent.analyze_source_credibility",
+            return_value=SourceCredibilitySchema(
+                score=19,
+                reason="具有明确编辑责任的行业媒体",
+            ),
+        ):
+            errors = score_sources_with_ai([article])
+
+        self.assertEqual(errors, [])
+        quality = article["quality_pre"]
+        self.assertEqual(quality.dimension_scores["source_credibility"], 19)
+        self.assertEqual(quality.source_score_method, "ai")
+        self.assertIn("AI 评估", quality.dimension_reasons["source_credibility"])
 
     def test_routes_analysis_to_openai(self) -> None:
         expected = NewsCaseSchema(
@@ -193,6 +218,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
 
         with (
             patch("agent.fetch_and_extract_batch", return_value=[article]),
+            patch("agent.score_sources_with_ai", return_value=[]),
             patch("agent.analyze_article", return_value=analysis),
             patch(
                 "agent.append_cases_batch_with_summary",
@@ -224,6 +250,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
 
         with (
             patch("agent.fetch_and_extract_batch", return_value=[article]),
+            patch("agent.score_sources_with_ai", return_value=[]),
             patch(
                 "agent.analyze_article",
                 side_effect=ArticleAnalysisError("OpenAI 配额不足（429）"),
@@ -295,6 +322,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
         progress_messages: list[str] = []
         with (
             patch.dict(os.environ, {"AI_ANALYSIS_WORKERS": "2"}),
+            patch("agent.score_sources_with_ai", return_value=[]),
             patch("agent.analyze_article", side_effect=analyze_side_effect),
             patch(
                 "agent.append_cases_batch_with_summary",
