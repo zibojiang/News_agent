@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from agent import (
     ArticleAnalysisError,
+    BodyQualitySchema,
     NewsCaseSchema,
     _keep_verifiable_evidence,
     analyze_article,
@@ -18,6 +19,25 @@ from agent import (
     get_openai_model,
     run_pipeline,
 )
+
+
+def _body_quality() -> BodyQualitySchema:
+    return BodyQualitySchema(
+        evidence_score=12,
+        evidence_reason="关键数据在正文中有明确支撑",
+        completeness_score=8,
+        completeness_reason="主体和事件背景较完整",
+        transparency_score=8,
+        transparency_reason="引用来源和数据口径明确",
+        headline_body_consistency_score=5,
+        headline_body_consistency_reason="标题准确反映正文",
+        balance_score=4,
+        balance_reason="表述客观并说明局限",
+        clarity_score=5,
+        clarity_reason="结构清晰，逻辑连贯",
+        has_serious_unsupported_claims=False,
+        unsupported_claims_reason="",
+    )
 
 
 class AgentEvidenceTestCase(unittest.TestCase):
@@ -53,6 +73,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
             relevance_score=85,
             source_credibility_score=20,
             source_credibility_reason="可验证的企业官网",
+            body_quality=_body_quality(),
         )
         response = SimpleNamespace(
             choices=[
@@ -97,6 +118,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
             relevance_score=50,
             source_credibility_score=10,
             source_credibility_reason="来源信息有限",
+            body_quality=_body_quality(),
         )
         with patch("agent.analyze_article_with_openai", return_value=expected) as call:
             result = analyze_article(
@@ -152,6 +174,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
             relevance_score=60,
             source_credibility_score=18,
             source_credibility_reason="可验证的行业媒体",
+            body_quality=_body_quality(),
         )
         write_summary = {
             "news_inserted": 1,
@@ -186,6 +209,10 @@ class AgentEvidenceTestCase(unittest.TestCase):
         self.assertEqual(summary["details"][0]["storage_status"], "已新增")
         self.assertEqual(summary["details"][0]["summary"], "测试摘要")
         self.assertIn("dimension_scores", summary["details"][0]["quality_details"])
+        self.assertEqual(
+            summary["details"][0]["quality_details"]["body_quality_score"],
+            42,
+        )
 
     def test_pipeline_surfaces_article_analysis_failure(self) -> None:
         article = {
@@ -252,6 +279,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
                 relevance_score=85,
                 source_credibility_score=20,
                 source_credibility_reason="可验证的主流来源",
+                body_quality=_body_quality(),
             )
 
         write_summary = {

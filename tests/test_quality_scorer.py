@@ -19,6 +19,27 @@ from quality_scorer import (
 from datetime import datetime, timezone, timedelta
 
 
+def _body_quality_scores(**overrides):
+    result = {
+        "evidence_score": 15,
+        "evidence_reason": "关键事实均有正文证据",
+        "completeness_score": 10,
+        "completeness_reason": "背景、主体和影响完整",
+        "transparency_score": 10,
+        "transparency_reason": "信源和数据口径透明",
+        "headline_body_consistency_score": 5,
+        "headline_body_consistency_reason": "标题准确反映正文",
+        "balance_score": 5,
+        "balance_reason": "事实与观点区分清楚",
+        "clarity_score": 5,
+        "clarity_reason": "结构清晰连贯",
+        "has_serious_unsupported_claims": False,
+        "unsupported_claims_reason": "",
+    }
+    result.update(overrides)
+    return result
+
+
 class TestSourceCredibility(unittest.TestCase):
     def test_tier1_source(self):
         score, reason = compute_source_credibility("财联社", "https://www.cls.cn/detail/123")
@@ -149,16 +170,28 @@ class TestFreshness(unittest.TestCase):
     def test_today(self):
         dt = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S%z")
         score, _ = compute_freshness(dt)
-        self.assertGreaterEqual(score, 8)
+        self.assertEqual(score, 5)
 
-    def test_old_article(self):
-        old = (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%S%z")
-        score, _ = compute_freshness(old)
-        self.assertLessEqual(score, 4)
+    def test_month_based_freshness_bands(self):
+        expected_by_age = {
+            30: 5,
+            90: 4,
+            150: 3,
+            240: 2,
+            330: 1,
+            400: 0,
+        }
+        for age_days, expected_score in expected_by_age.items():
+            with self.subTest(age_days=age_days):
+                published = (
+                    datetime.now(timezone.utc) - timedelta(days=age_days)
+                ).strftime("%Y-%m-%dT%H:%M:%S%z")
+                score, _ = compute_freshness(published)
+                self.assertEqual(score, expected_score)
 
     def test_invalid_date(self):
         score, _ = compute_freshness("这是一段无效日期")
-        self.assertEqual(score, 3)
+        self.assertEqual(score, 1)
 
 
 class TestPenalties(unittest.TestCase):
@@ -181,7 +214,7 @@ class TestPenalties(unittest.TestCase):
 class TestQualityLabel(unittest.TestCase):
     def test_excellent(self):
         label, desc = compute_quality_label(92)
-        self.assertEqual(label, "优秀")
+        self.assertEqual(label, "高质量")
 
     def test_very_low(self):
         label, desc = compute_quality_label(25)
@@ -201,12 +234,13 @@ class TestPreAI(unittest.TestCase):
         )
         self.assertIsInstance(summary, QualitySummary)
         self.assertGreater(summary.total_score, 0)
-        self.assertLessEqual(summary.total_score, 100)
+        self.assertLessEqual(summary.total_score, 50)
         self.assertIn("source_credibility", summary.dimension_scores)
-        self.assertIn("keyword_relevance", summary.dimension_scores)
+        self.assertNotIn("keyword_relevance", summary.dimension_scores)
         self.assertIn("content_density", summary.dimension_scores)
         self.assertIn("data_richness", summary.dimension_scores)
         self.assertIn("freshness", summary.dimension_scores)
+        self.assertEqual(summary.label, "预筛")
 
     def test_adjusted_score_non_negative(self):
         summary = QualitySummary(
@@ -235,22 +269,129 @@ class TestAIEnrichment(unittest.TestCase):
         self.assertIn("IBM", enriched.dimension_reasons["source_credibility"])
 
     def test_enrich_adds_dimensions(self):
-        summary = QualitySummary(total_score=50)
+        summary = QualitySummary(
+            total_score=50,
+            dimension_scores={
+                "source_credibility": 25,
+                "content_density": 10,
+                "data_richness": 10,
+                "freshness": 5,
+            },
+        )
         ai = {
-            "headlineBodyConsistency": 0.85,
-            "originalReportingSignals": ["含独家采访"],
-            "namedSourceCount": 3,
-            "hasBackgroundContext": True,
-            "primaryDocumentCount": 1,
-            "containsCounterpartyResponse": True,
-            "containsDirectQuotes": True,
-            "articleType": "factual",
+            "content": "正文内容完整。" * 100,
+            "sourceCredibilityScore": 25,
+            "sourceCredibilityReason": "权威来源",
+            "bodyQuality": _body_quality_scores(),
         }
         enriched = enrich_with_ai_result(summary, ai)
+        self.assertIn("evidence_quality", enriched.dimension_scores)
         self.assertIn("headline_body_consistency", enriched.dimension_scores)
-        self.assertIn("originality", enriched.dimension_scores)
         self.assertIn("completeness", enriched.dimension_scores)
         self.assertIn("transparency", enriched.dimension_scores)
+        self.assertIn("balance", enriched.dimension_scores)
+        self.assertIn("clarity", enriched.dimension_scores)
+        self.assertEqual(enriched.total_score, 100)
+        self.assertEqual(enriched.adjusted_score, 100)
+        self.assertEqual(enriched.label, "高质量")
+
+    def test_incomplete_extraction_caps_score_at_59(self):
+        summary = QualitySummary(
+            total_score=50,
+            dimension_scores={
+                "source_credibility": 25,
+                "content_density": 10,
+                "data_richness": 10,
+                "freshness": 5,
+            },
+        )
+        enriched = enrich_with_ai_result(
+            summary,
+            {
+                "content": "正文内容。" * 30,
+                "sourceCredibilityScore": 25,
+                "bodyQuality": _body_quality_scores(),
+            },
+        )
+        self.assertEqual(enriched.adjusted_score, 59)
+        self.assertTrue(any("提取不完整" in item for item in enriched.quality_warnings))
+
+    def test_minimum_high_quality_gates_cap_score_at_84(self):
+        summary = QualitySummary(
+            total_score=50,
+            dimension_scores={
+                "source_credibility": 25,
+                "content_density": 10,
+                "data_richness": 10,
+                "freshness": 5,
+            },
+        )
+        enriched = enrich_with_ai_result(
+            summary,
+            {
+                "content": "正文内容完整。" * 100,
+                "sourceCredibilityScore": 14,
+                "bodyQuality": _body_quality_scores(),
+            },
+        )
+        self.assertEqual(enriched.score_cap, 84)
+        self.assertEqual(enriched.adjusted_score, 84)
+        self.assertNotEqual(enriched.label, "高质量")
+
+    def test_low_body_quality_cannot_be_high_quality(self):
+        summary = QualitySummary(
+            total_score=50,
+            dimension_scores={
+                "source_credibility": 25,
+                "content_density": 10,
+                "data_richness": 10,
+                "freshness": 5,
+            },
+        )
+        enriched = enrich_with_ai_result(
+            summary,
+            {
+                "content": "正文内容完整。" * 100,
+                "sourceCredibilityScore": 25,
+                "bodyQuality": _body_quality_scores(
+                    evidence_score=9,
+                    completeness_score=6,
+                    transparency_score=6,
+                    headline_body_consistency_score=4,
+                    balance_score=4,
+                    clarity_score=4,
+                ),
+            },
+        )
+        self.assertEqual(enriched.adjusted_score, 83)
+        self.assertTrue(
+            any("低于 35/50" in item for item in enriched.quality_warnings)
+        )
+        self.assertNotEqual(enriched.label, "高质量")
+
+    def test_serious_unsupported_claim_caps_score_at_59(self):
+        summary = QualitySummary(
+            total_score=50,
+            dimension_scores={
+                "source_credibility": 25,
+                "content_density": 10,
+                "data_richness": 10,
+                "freshness": 5,
+            },
+        )
+        enriched = enrich_with_ai_result(
+            summary,
+            {
+                "content": "正文内容完整。" * 100,
+                "sourceCredibilityScore": 25,
+                "bodyQuality": _body_quality_scores(
+                    has_serious_unsupported_claims=True,
+                    unsupported_claims_reason="核心结论缺少正文证据",
+                ),
+            },
+        )
+        self.assertEqual(enriched.score_cap, 59)
+        self.assertEqual(enriched.adjusted_score, 59)
 
     def test_enrich_preserves_existing(self):
         summary = QualitySummary(total_score=50, dimension_scores={"source_credibility": 20})

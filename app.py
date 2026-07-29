@@ -72,6 +72,8 @@ def _parse_quality_json(raw: Any) -> dict:
 def _quality_label_badge(label: str) -> str:
     """返回质量标签对应的 Emoji 标识。"""
     mapping = {
+        "高质量": "🟢",
+        "质量良好": "🔵",
         "优秀": "🟢",
         "良好": "🔵",
         "一般": "🟡",
@@ -362,40 +364,90 @@ def _render_score_breakdown(quality_details: dict) -> None:
     total = quality_details.get("total_score", 0)
     adjusted = quality_details.get("adjusted_score", total)
     quality_label = quality_details.get("label", "")
+    quality_warnings = quality_details.get("quality_warnings", [])
 
     dim_labels = {
         "source_credibility": "来源权威度",
-        "keyword_relevance": "关键词匹配",
         "content_density": "信息密度",
         "data_richness": "数据含量",
         "freshness": "时效性",
-        "headline_body_consistency": "标题一致性",
-        "originality": "原创性",
+        "evidence_quality": "正文证据与可核验性",
         "completeness": "报道完整性",
-        "transparency": "透明度",
+        "transparency": "信源与方法透明度",
+        "headline_body_consistency": "标题正文一致性",
+        "balance": "客观与平衡性",
+        "clarity": "清晰与连贯性",
+    }
+    dim_max_scores = {
+        "source_credibility": 25,
+        "content_density": 10,
+        "data_richness": 10,
+        "freshness": 5,
+        "evidence_quality": 15,
+        "completeness": 10,
+        "transparency": 10,
+        "headline_body_consistency": 5,
+        "balance": 5,
+        "clarity": 5,
     }
     items: list[str] = []
     for key, label in dim_labels.items():
         score = dim_scores.get(key, 0)
         reason = dim_reasons.get(key, "")
         if score > 0 or reason:
-            items.append(f"{label}（{score}分）")
+            items.append(f"{label}（{score}/{dim_max_scores[key]}）")
     total_deduction = sum(p.get("deduction", 0) for p in penalties)
 
     formula_parts = " + ".join(items) if items else "无维度数据"
     if total_deduction > 0:
         formula_parts += f" — 扣分（{total_deduction}分）"
-    heading = f"{adjusted} 分"
-    if quality_label:
+    is_pre_score = quality_label == "预筛"
+    if is_pre_score:
+        heading = f"预筛基础分 {adjusted}/50"
+    else:
+        heading = f"综合质量 {adjusted}/100"
+    if quality_label and not is_pre_score:
         heading += f" · {quality_label}"
-    st.markdown(f"#### ⭐ 综合评分 {heading}")
+    st.markdown(f"#### ⭐ {heading}")
+    base_score = sum(
+        int(dim_scores.get(key, 0) or 0)
+        for key in (
+            "source_credibility",
+            "content_density",
+            "data_richness",
+            "freshness",
+        )
+    )
+    if "evidence_quality" in dim_scores:
+        body_score = int(
+            quality_details.get(
+                "body_quality_score",
+                sum(
+                    int(dim_scores.get(key, 0) or 0)
+                    for key in (
+                        "evidence_quality",
+                        "completeness",
+                        "transparency",
+                        "headline_body_consistency",
+                        "balance",
+                        "clarity",
+                    )
+                ),
+            )
+            or 0
+        )
+        st.caption(f"基础维度 {base_score}/50 · AI 正文质量 {body_score}/50")
+    else:
+        st.caption(f"基础维度 {base_score}/50 · 等待 AI 正文质量评分")
     st.caption(f"计算方式：{formula_parts}")
+    for warning in quality_warnings:
+        st.warning(str(warning))
 
     for key, label in dim_labels.items():
         score = dim_scores.get(key, 0)
         reason = dim_reasons.get(key, "")
         if score > 0 or reason:
-            st.markdown(f"**{label}：{score} 分**")
+            st.markdown(f"**{label}：{score}/{dim_max_scores[key]} 分**")
             if reason:
                 st.caption(reason)
     for penalty in penalties:
@@ -430,6 +482,10 @@ def _quality_state(quality: Any) -> dict[str, Any]:
         ),
         "penalties": penalties,
         "label": _quality_value(quality, "label", ""),
+        "score_cap": _quality_value(quality, "score_cap", 100),
+        "quality_warnings": list(
+            _quality_value(quality, "quality_warnings", []) or []
+        ),
     }
 
 
@@ -531,8 +587,8 @@ def _render_article_cards(
         )
         st.caption(
             f"已完成 AI 分析 {analyzed_count}/{len(articles)} 篇"
-            f" | 预筛均分 {total_pre_score // len(articles)} → 综合均分 "
-            f"{analyzed_score // max(analyzed_count, 1)}"
+            f" | 预筛基础均分 {total_pre_score // len(articles)}/50"
+            f" → 综合质量均分 {analyzed_score // max(analyzed_count, 1)}/100"
         )
     else:
         st.caption("新闻已搜索到，可以先浏览标题和原文；AI 分析会在后台继续。")
@@ -587,7 +643,7 @@ def _render_article_cards(
                     quality = result.get("quality_score", 0) or 0
                     label = result.get("quality_label", "")
                     st.metric("相关性", f"{relevance}分")
-                    st.metric("综合质量", f"{quality}分", label)
+                    st.metric("综合质量", f"{quality}/100", label)
                     status = result.get("analysis_status", "?")
                     store = result.get("storage_status", "?")
                     st.caption(f"AI: {status} | 写入: {store}")
@@ -596,14 +652,14 @@ def _render_article_cards(
                         '<div class="article-found-status">✓ 已搜索到</div>',
                         unsafe_allow_html=True,
                     )
-                    st.metric("新闻预筛质量", f"{pre_score}分")
+                    st.metric("预筛基础分", f"{pre_score}/50")
                     st.caption("AI 分析中…")
 
             if result and result.get("analysis_status") == "成功":
                 quality_score = result.get("quality_score", 0) or 0
                 quality_label = result.get("quality_label", "")
                 with st.expander(
-                    f"⭐ 查看完整评分｜{quality_score}分 · {quality_label}"
+                    f"⭐ 查看完整评分｜{quality_score}/100 · {quality_label}"
                 ):
                     quality_json = result.get("quality_details")
                     if quality_json:
@@ -614,7 +670,7 @@ def _render_article_cards(
                     if reason:
                         st.caption(f"判定理由：{reason}")
             elif not result:
-                with st.expander(f"⭐ 查看评分依据｜预筛 {pre_score}分"):
+                with st.expander(f"⭐ 查看评分依据｜预筛 {pre_score}/50"):
                     if pre_dims:
                         _render_score_breakdown({
                             "total_score": _quality_value(pre, "total_score", pre_score),
@@ -625,6 +681,9 @@ def _render_article_cards(
                             ),
                             "penalties": _quality_state(pre)["penalties"],
                             "label": _quality_value(pre, "label", ""),
+                            "quality_warnings": _quality_value(
+                                pre, "quality_warnings", []
+                            ),
                         })
                     else:
                         st.caption("暂无评分明细")

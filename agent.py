@@ -74,6 +74,53 @@ RETRY_BASE_DELAY = 2.0  # 秒，指数退避基数
 DEFAULT_MIN_SCORE = 70
 
 
+class BodyQualitySchema(BaseModel):
+    """AI 对新闻正文质量的结构化评分，总分 50 分。"""
+
+    evidence_score: int = Field(
+        ge=0,
+        le=15,
+        description="关键事实和结论是否有正文内证据支撑，0-15 分",
+    )
+    evidence_reason: str = Field(description="证据充分性评分依据")
+    completeness_score: int = Field(
+        ge=0,
+        le=10,
+        description="正文是否交代事件、背景、主体、影响和必要上下文，0-10 分",
+    )
+    completeness_reason: str = Field(description="报道完整性评分依据")
+    transparency_score: int = Field(
+        ge=0,
+        le=10,
+        description="信源、引用、数据口径和研究方法是否透明，0-10 分",
+    )
+    transparency_reason: str = Field(description="透明度评分依据")
+    headline_body_consistency_score: int = Field(
+        ge=0,
+        le=5,
+        description="标题是否准确反映正文且不夸大，0-5 分",
+    )
+    headline_body_consistency_reason: str = Field(description="标题正文一致性评分依据")
+    balance_score: int = Field(
+        ge=0,
+        le=5,
+        description="表述是否客观，并说明局限、风险或不同立场，0-5 分",
+    )
+    balance_reason: str = Field(description="客观与平衡性评分依据")
+    clarity_score: int = Field(
+        ge=0,
+        le=5,
+        description="结构是否清晰、逻辑是否连贯、表达是否准确，0-5 分",
+    )
+    clarity_reason: str = Field(description="清晰与连贯性评分依据")
+    has_serious_unsupported_claims: bool = Field(
+        description="是否存在会显著影响结论、但正文没有证据支撑的严重断言"
+    )
+    unsupported_claims_reason: str = Field(
+        description="严重无支持断言的说明；若不存在则返回空字符串"
+    )
+
+
 class NewsCaseSchema(BaseModel):
     """
     新闻商业案例结构化输出 Schema。
@@ -111,6 +158,9 @@ class NewsCaseSchema(BaseModel):
     )
     source_credibility_reason: str = Field(
         description="AI 给出来源权威度分数的简短、可核对依据"
+    )
+    body_quality: BodyQualitySchema = Field(
+        description="AI 对正文质量六个子维度的结构化评分，总分 50 分"
     )
 
 
@@ -204,10 +254,21 @@ ANALYST_SYSTEM_PROMPT = """你是一位资深商业分析师，擅长撰写行�
    - 0-7：内容农场、个人博客、无原始出处的聚合站或明显可疑来源
    source_credibility_reason 需说明判断依据；不得编造网站背景、奖项或影响力数据。
 
-6. **证据可追溯**：evidence_quotes 只能摘录输入正文中真实存在的短句，
+6. **body_quality 正文质量（0-50）**：只根据输入的正文评分，不要根据来源名补分，
+   六个子维度必须分别给出分数和简短依据：
+   - evidence_score（0-15）：关键事实、数据与结论是否有正文内证据支撑，证据能否核对
+   - completeness_score（0-10）：是否交代事件、背景、主体、影响与必要上下文
+   - transparency_score（0-10）：是否说明具名信源、直接引用、数据口径或研究方法
+   - headline_body_consistency_score（0-5）：标题是否准确反映正文且不过度夸大
+   - balance_score（0-5）：是否区分事实与观点，并呈现必要的局限、风险或不同立场
+   - clarity_score（0-5）：结构是否清晰、逻辑是否连贯、表达是否准确
+   has_serious_unsupported_claims 仅在影响核心结论的断言缺乏正文证据时设为 true，
+   不要因为无法联网进行外部核验就判定为 true。
+
+7. **证据可追溯**：evidence_quotes 只能摘录输入正文中真实存在的短句，
    不得补全、改写或编造数字。
 
-7. 若正文无法提取有效量化案例，bullet_points 和 evidence_quotes 可为空数组，
+8. 若正文无法提取有效量化案例，bullet_points 和 evidence_quotes 可为空数组，
    relevance_score 应相应降低。
 
 请基于以下输入进行分析，并严格按 JSON Schema 返回结果。"""
@@ -262,7 +323,7 @@ def _build_user_prompt(
 
 请输出 title、url、summary、bullet_points、evidence_quotes、
 involved_companies、regions、metric_tags、relevance_score、
-source_credibility_score、source_credibility_reason 字段。
+source_credibility_score、source_credibility_reason、body_quality 字段。
 其中 title 和 url 请直接使用上方提供的值。"""
 
 
@@ -977,16 +1038,7 @@ def run_pipeline(
                 "content": article.get("content", ""),
                 "sourceCredibilityScore": result.source_credibility_score,
                 "sourceCredibilityReason": result.source_credibility_reason,
-                "headlineBodyConsistency": getattr(result, "headline_body_consistency", None),
-                "originalReportingSignals": getattr(result, "original_reporting_signals", []),
-                "namedSourceCount": getattr(result, "named_source_count", 0),
-                "hasBackgroundContext": getattr(result, "has_background_context", False),
-                "primaryDocumentCount": getattr(result, "primary_document_count", 0),
-                "containsCounterpartyResponse": getattr(result, "contains_counterparty_response", False),
-                "containsDirectQuotes": getattr(result, "contains_direct_quotes", False),
-                "articleType": getattr(result, "article_type", ""),
-                "unsupportedClaims": getattr(result, "unsupported_claims", []),
-                "ai_confidence": getattr(result, "ai_confidence", None),
+                "bodyQuality": result.body_quality.model_dump(),
             }
             if isinstance(pre_score, QualitySummary):
                 quality = enrich_with_ai_result(pre_score, ai_data)
@@ -1020,6 +1072,17 @@ def run_pipeline(
                     "adjusted_score": quality.adjusted_score,
                     "dimension_scores": quality.dimension_scores,
                     "dimension_reasons": quality.dimension_reasons,
+                    "body_quality_score": sum(
+                        quality.dimension_scores.get(key, 0)
+                        for key in (
+                            "evidence_quality",
+                            "completeness",
+                            "transparency",
+                            "headline_body_consistency",
+                            "balance",
+                            "clarity",
+                        )
+                    ),
                     "penalties": [
                         {"reason": p.reason, "deduction": p.deduction}
                         for p in quality.penalties
@@ -1028,6 +1091,8 @@ def run_pipeline(
                     "label_description": quality.label_description,
                     "rule_version": quality.rule_version,
                     "ai_confidence": quality.ai_confidence,
+                    "score_cap": quality.score_cap,
+                    "quality_warnings": quality.quality_warnings,
                 },
             }
             detail["quality_details"] = case_dict["quality_details"]
