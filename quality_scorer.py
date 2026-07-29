@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # 评分规则版本 — 变更时触发重新评分
 # ============================================================
-NEWS_QUALITY_RULE_VERSION = "v1"
+NEWS_QUALITY_RULE_VERSION = "v2"
 
 # ============================================================
 # 来源权威度配置（独立存放，便于扩展）
@@ -35,6 +35,9 @@ TIER1_SOURCES: dict[str, int] = {
     "36氪": 21, "澎湃新闻": 21, "中国证券报": 23, "上海证券报": 23,
     "证券日报": 22, "中国经营报": 21, "中新社": 24, "中国新闻网": 24,
     "光明日报": 23, "经济日报": 23, "科技日报": 22,
+    "Reuters": 25, "Associated Press": 25, "AP News": 25, "BBC": 24,
+    "Bloomberg": 24, "Financial Times": 24, "The Wall Street Journal": 24,
+    "The New York Times": 23, "CNBC": 22,
 }
 
 # 二级：大型门户财经频道
@@ -43,6 +46,8 @@ TIER2_SOURCES: dict[str, int] = {
     "凤凰财经": 16, "凤凰网": 16, "腾讯财经": 15, "腾讯": 15,
     "东方财富": 15, "搜狐财经": 14, "搜狐": 14, "华尔街见闻": 17,
     "FT中文网": 18, "财新网": 18,
+    "CNN": 18, "The Guardian": 18, "Forbes": 17, "TechCrunch": 17,
+    "Skift": 18, "PhocusWire": 18,
 }
 
 # 三级/聚合器
@@ -74,19 +79,19 @@ def compute_source_credibility(source: str, url: str) -> tuple[int, str]:
     ]:
         if tier_sources is TIER1_SOURCES:
             for name, s in TIER1_SOURCES.items():
-                if name in source_clean:
+                if name.casefold() in source_clean.casefold():
                     score = s
                     reasons.append(f"一级媒体：{name}")
                     break
         elif tier_sources is TIER2_SOURCES:
             for name, s in TIER2_SOURCES.items():
-                if name in source_clean:
+                if name.casefold() in source_clean.casefold():
                     score = s
                     reasons.append(f"二级媒体：{name}")
                     break
         elif tier_sources is TIER3_SOURCES:
             for name, s in TIER3_SOURCES.items():
-                if name in source_clean:
+                if name.casefold() in source_clean.casefold():
                     score = s
                     reasons.append(f"聚合/平台来源：{name}")
                     break

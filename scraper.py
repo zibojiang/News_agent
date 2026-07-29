@@ -40,6 +40,13 @@ REQUEST_TIMEOUT = 15
 # 单次抓取最大文章数（避免 API 调用过多）
 MAX_ARTICLES_PER_RUN = 8
 
+AUTHORITATIVE_SOURCE_NAMES = (
+    "Reuters", "Associated Press", "AP News", "BBC", "Bloomberg",
+    "Financial Times", "The Wall Street Journal", "The New York Times",
+    "CNBC", "新华社", "新华网", "人民日报", "财联社", "第一财经",
+    "中国新闻网", "中新社", "证券时报", "中国证券报",
+)
+
 
 def _safe_get(url: str, timeout: int = REQUEST_TIMEOUT) -> requests.Response | None:
     """
@@ -216,13 +223,55 @@ def _parse_rss_pub_date(pub_date: str) -> str:
     return pub_date.strip()
 
 
-def fetch_latest_news(query: str, max_articles: int = MAX_ARTICLES_PER_RUN) -> list[dict[str, Any]]:
+def _source_priority(article: dict[str, Any]) -> int:
+    """返回媒体候选优先级，只影响抓取顺序，不直接排除小型媒体。"""
+    source = str(article.get("source", "")).casefold()
+    for index, name in enumerate(AUTHORITATIVE_SOURCE_NAMES):
+        if name.casefold() in source:
+            return len(AUTHORITATIVE_SOURCE_NAMES) - index
+    return 0
+
+
+def _merge_news_sources(
+    source_results: list[tuple[str, list[dict[str, Any]]]],
+    max_articles: int,
+) -> list[dict[str, Any]]:
+    """合并中英文新闻源，去重后保留约三分之一英文候选。"""
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for language, articles in source_results:
+        for article in articles:
+            title_key = re.sub(r"\W+", "", str(article.get("title", "")).casefold())
+            if not title_key or title_key in seen:
+                continue
+            seen.add(title_key)
+            item = dict(article)
+            item["language"] = language
+            merged.append(item)
+
+    ranked = sorted(merged, key=_source_priority, reverse=True)
+    english = [item for item in ranked if item.get("language") == "en"]
+    chinese = [item for item in ranked if item.get("language") != "en"]
+    english_quota = min(len(english), max_articles // 3)
+    selected = chinese[: max_articles - english_quota] + english[:english_quota]
+    selected_ids = {id(item) for item in selected}
+    selected.extend(
+        item for item in ranked if id(item) not in selected_ids
+    )
+    return sorted(selected[:max_articles], key=_source_priority, reverse=True)
+
+
+def fetch_latest_news(
+    query: str,
+    max_articles: int = MAX_ARTICLES_PER_RUN,
+    english_query: str | None = None,
+) -> list[dict[str, Any]]:
     """
     根据行业关键词抓取最新真实新闻列表。
 
-    数据源（按优先级）：
-    1. Google News RSS（中文）
-    2. Bing News RSS（备用，同为真实新闻源）
+    数据源：
+    1. Google News RSS（中文 + 英文）
+    2. Bing News RSS（Google 无结果时备用）
 
     所有数据源均来自公开 RSS，不包含任何模拟/虚构数据。
     若全部源均不可用，返回空列表。
@@ -230,6 +279,7 @@ def fetch_latest_news(query: str, max_articles: int = MAX_ARTICLES_PER_RUN) -> l
     Args:
         query: 行业关键词，如「新能源」「人工智能」
         max_articles: 最多返回的文章条数
+        english_query: 可选英文检索词，留空时使用 query
 
     Returns:
         新闻列表，每项包含 title / url / published_at
@@ -238,30 +288,52 @@ def fetch_latest_news(query: str, max_articles: int = MAX_ARTICLES_PER_RUN) -> l
         RuntimeError: 所有真实新闻源均无法获取数据时抛出
     """
     encoded_query = quote_plus(query)
+    encoded_english_query = quote_plus(english_query or query)
     logger.info("开始抓取真实新闻列表，关键词: %s", query)
 
-    # 真实新闻 RSS 源（按优先级排列）
-    rss_sources = [
+    google_sources = [
         (
-            "Google News",
+            "zh",
+            "Google News 中文",
             f"https://news.google.com/rss/search?"
             f"q={encoded_query}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
         ),
         (
-            "Bing News",
-            f"https://www.bing.com/news/search?q={encoded_query}&format=rss",
+            "en",
+            "Google News English",
+            f"https://news.google.com/rss/search?"
+            f"q={encoded_english_query}&hl=en-US&gl=US&ceid=US:en",
         ),
     ]
 
-    articles: list[dict[str, Any]] = []
+    source_results: list[tuple[str, list[dict[str, Any]]]] = []
     errors: list[str] = []
 
-    for source_name, rss_url in rss_sources:
-        fetched = _fetch_rss_news(rss_url, max_articles, source_name)
+    with ThreadPoolExecutor(max_workers=len(google_sources)) as executor:
+        futures = {
+            executor.submit(_fetch_rss_news, rss_url, max_articles, source_name): (
+                language,
+                source_name,
+            )
+            for language, source_name, rss_url in google_sources
+        }
+        for future in as_completed(futures):
+            language, source_name = futures[future]
+            fetched = future.result()
+            if fetched:
+                source_results.append((language, fetched))
+            else:
+                errors.append(f"{source_name} 无有效结果")
+
+    if not source_results:
+        bing_url = f"https://www.bing.com/news/search?q={encoded_query}&format=rss"
+        fetched = _fetch_rss_news(bing_url, max_articles, "Bing News")
         if fetched:
-            articles = fetched
-            break
-        errors.append(f"{source_name} 无有效结果")
+            source_results.append(("zh", fetched))
+        else:
+            errors.append("Bing News 无有效结果")
+
+    articles = _merge_news_sources(source_results, max_articles)
 
     if not articles:
         error_msg = f"无法从任何真实新闻源获取数据（关键词: {query}）: {'; '.join(errors)}"
@@ -372,6 +444,7 @@ def fetch_and_extract_batch(
     max_workers: int = 8,
     min_content_length: int = 200,
     article_callback: Callable[[dict[str, Any], int, int], None] | None = None,
+    english_query: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     抓取新闻列表并并行提取正文，含质量预筛。
@@ -382,6 +455,7 @@ def fetch_and_extract_batch(
         max_workers: 并行提取的最大线程数
         min_content_length: 最低正文长度，低于此值直接跳过
         article_callback: 每提取到一篇有效文章时的回调
+        english_query: 可选英文检索词
 
     Returns:
         包含 title/url/source/published_at/content/content_hash 的字典列表
@@ -389,7 +463,14 @@ def fetch_and_extract_batch(
     # 多抓一些以备质量筛选
     # 保留少量候选供正文质量筛选，避免为 8 篇结果预先访问 16 个网站。
     fetch_count = max(8, max_articles + 4)
-    news_list = fetch_latest_news(query, max_articles=fetch_count)
+    if english_query:
+        news_list = fetch_latest_news(
+            query,
+            max_articles=fetch_count,
+            english_query=english_query,
+        )
+    else:
+        news_list = fetch_latest_news(query, max_articles=fetch_count)
     results: list[dict[str, Any]] = []
 
     def _extract_one(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -407,6 +488,7 @@ def fetch_and_extract_batch(
             "title": item["title"],
             "url": url,
             "source": item.get("source", ""),
+            "language": item.get("language", "zh"),
             "published_at": item.get("published_at", ""),
             "content": content,
             "content_hash": hashlib.sha256(

@@ -54,6 +54,31 @@ class AppSmokeTestCase(unittest.TestCase):
                     any("✓ 已搜索到" in markdown.value for markdown in app.markdown)
                 )
 
+                app.session_state["fetched_results"] = {
+                    0: {
+                        "analysis_status": "成功",
+                        "storage_status": "已新增",
+                        "score": 88,
+                        "summary": "这是一条用于卡片展示的 AI 新闻摘要。",
+                        "quality_score": 86,
+                        "quality_label": "优秀",
+                        "quality_details": {
+                            "adjusted_score": 86,
+                            "dimension_scores": {"source_credibility": 25},
+                            "dimension_reasons": {"source_credibility": "一级媒体"},
+                            "penalties": [],
+                            "label": "优秀",
+                        },
+                    }
+                }
+                app.run(timeout=20)
+                self.assertTrue(
+                    any("AI 新闻摘要" in markdown.value for markdown in app.markdown)
+                )
+                self.assertTrue(
+                    any("查看完整评分" in expander.label for expander in app.expander)
+                )
+
                 management_button = next(
                     button for button in app.button if button.label == "⚙️"
                 )

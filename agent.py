@@ -681,6 +681,7 @@ def fetch_and_pre_score(
     industry_keyword: str,
     max_articles: int = 8,
     article_callback: Callable[[dict[str, Any], int, int], None] | None = None,
+    english_keyword: str | None = None,
 ) -> list[dict[str, Any]]:
     """抓取新闻列表并执行预 AI 质量评分（纯算法），返回文章列表供前端展示。
 
@@ -691,6 +692,7 @@ def fetch_and_pre_score(
         industry_keyword: 行业关键词
         max_articles: 单次最多处理文章数
         article_callback: 每找到一篇有效文章时的回调
+        english_keyword: 可选英文检索词
 
     Returns:
         已含 quality_pre 字段的文章列表
@@ -712,6 +714,7 @@ def fetch_and_pre_score(
         industry_keyword,
         max_articles=max_articles,
         article_callback=score_and_notify,
+        english_query=english_keyword,
     )
 
     # 兼容自定义抓取器或测试替身没有执行回调的情况。
@@ -929,6 +932,7 @@ def run_pipeline(
             summary["analyzed"] += 1
             detail["score"] = result.relevance_score
             detail["analysis_status"] = "成功"
+            detail["summary"] = result.summary
 
             # 后置主题归类（无预设主题时）
             resolved_topic = topic
@@ -1005,6 +1009,7 @@ def run_pipeline(
                     "ai_confidence": quality.ai_confidence,
                 },
             }
+            detail["quality_details"] = case_dict["quality_details"]
             summary["cases"].append(case_dict)
 
             qualification_reasons = _qualification_reasons(result, min_score)

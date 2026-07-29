@@ -25,6 +25,13 @@ class TestSourceCredibility(unittest.TestCase):
         self.assertGreaterEqual(score, 20)
         self.assertIn("财联社", reason)
 
+    def test_english_authoritative_source(self):
+        score, reason = compute_source_credibility(
+            "Reuters", "https://www.reuters.com/world/example"
+        )
+        self.assertEqual(score, 25)
+        self.assertIn("Reuters", reason)
+
     def test_unknown_source(self):
         score, reason = compute_source_credibility("未知小站", "https://example.com")
         self.assertGreaterEqual(score, 0)
@@ -193,4 +200,3 @@ class TestAIEnrichment(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

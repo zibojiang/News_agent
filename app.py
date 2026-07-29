@@ -359,6 +359,7 @@ def _render_score_breakdown(quality_details: dict) -> None:
     penalties = quality_details.get("penalties", [])
     total = quality_details.get("total_score", 0)
     adjusted = quality_details.get("adjusted_score", total)
+    quality_label = quality_details.get("label", "")
 
     dim_labels = {
         "source_credibility": "来源权威度",
@@ -382,13 +383,19 @@ def _render_score_breakdown(quality_details: dict) -> None:
     formula_parts = " + ".join(items) if items else "无维度数据"
     if total_deduction > 0:
         formula_parts += f" — 扣分（{total_deduction}分）"
-    st.markdown(f"**{adjusted}分** = {formula_parts}")
+    heading = f"{adjusted} 分"
+    if quality_label:
+        heading += f" · {quality_label}"
+    st.markdown(f"#### ⭐ 综合评分 {heading}")
+    st.caption(f"计算方式：{formula_parts}")
 
     for key, label in dim_labels.items():
         score = dim_scores.get(key, 0)
         reason = dim_reasons.get(key, "")
         if score > 0 or reason:
-            st.caption(f"{label}: {score}分 — {reason}" if reason else f"{label}: {score}分")
+            st.markdown(f"**{label}：{score} 分**")
+            if reason:
+                st.caption(reason)
     for penalty in penalties:
         st.caption(f"⚠️ 扣分 {penalty.get('deduction', 0)}：{penalty.get('reason', '')}")
 
@@ -442,14 +449,34 @@ def _render_article_cards(
         source = article.get("source", "未知来源")
         url = article.get("url", "#")
         published = str(article.get("published_at", ""))[:16]
+        language_label = " · 🌐 英文" if article.get("language") == "en" else ""
+        source_score = int(pre_dims.get("source_credibility", 0) or 0)
+        source_label = ""
+        if source_score >= 22:
+            source_label = " · 🛡️ 权威来源"
+        elif source_score >= 15:
+            source_label = " · 主流来源"
 
         with st.container(border=True):
             cols = st.columns([3, 1])
             with cols[0]:
                 st.markdown(f"**{title[:80]}**")
-                st.caption(f"{source} · {published}")
+                st.caption(f"{source} · {published}{language_label}{source_label}")
                 if url and url != "#":
                     st.markdown(f"[🔗 查看原文]({url})")
+                summary_text = ""
+                summary_label = ""
+                if result and result.get("summary"):
+                    summary_text = str(result["summary"])
+                    summary_label = "AI 摘要"
+                elif article.get("content"):
+                    summary_text = " ".join(str(article["content"]).split())[:180]
+                    if len(str(article["content"])) > 180:
+                        summary_text += "…"
+                    summary_label = "正文速览"
+                if summary_text:
+                    st.markdown(f"**📝 {summary_label}**")
+                    st.write(summary_text)
             with cols[1]:
                 if result:
                     relevance = result.get("score", 0) or 0
@@ -469,7 +496,11 @@ def _render_article_cards(
                     st.caption("AI 分析中…")
 
             if result and result.get("analysis_status") == "成功":
-                with st.expander(f"📊 评分详情（{result.get('quality_score', 0) or 0}分）"):
+                quality_score = result.get("quality_score", 0) or 0
+                quality_label = result.get("quality_label", "")
+                with st.expander(
+                    f"⭐ 查看完整评分｜{quality_score}分 · {quality_label}"
+                ):
                     quality_json = result.get("quality_details")
                     if quality_json:
                         _render_score_breakdown(quality_json)
@@ -479,7 +510,7 @@ def _render_article_cards(
                     if reason:
                         st.caption(f"判定理由：{reason}")
             elif not result:
-                with st.expander("📊 预筛评分详情"):
+                with st.expander(f"⭐ 查看评分依据｜预筛 {pre_score}分"):
                     if hasattr(pre, "dimension_scores") and pre.dimension_scores:
                         _render_score_breakdown({
                             "total_score": pre.total_score if hasattr(pre, "total_score") else pre_score,
@@ -493,6 +524,7 @@ def _render_article_cards(
                                 {"reason": p.reason, "deduction": p.deduction}
                                 for p in (pre.penalties if hasattr(pre, "penalties") else [])
                             ],
+                            "label": pre.label if hasattr(pre, "label") else "",
                         })
                     else:
                         st.caption("暂无评分明细")
@@ -836,6 +868,11 @@ def _render_search_page(cloud_demo: bool) -> None:
                 "案例入库门槛", min_value=0, max_value=100, value=70, step=5,
                 help="低于门槛的结果仍会保留在新闻池。",
             )
+            english_keyword = st.text_input(
+                "英文关键词（可选）",
+                placeholder="例如 Fosun AI；留空时自动使用上方关键词",
+                help="用于搜索 Reuters、BBC、Bloomberg 等英文新闻源。",
+            )
         st.markdown(
             """
             <div class="search-examples">
@@ -876,6 +913,7 @@ def _render_search_page(cloud_demo: bool) -> None:
                         industry_keyword=keyword,
                         max_articles=int(max_articles),
                         article_callback=show_found_article,
+                        english_keyword=english_keyword.strip() or None,
                     )
                 except Exception as exc:
                     logger.error("搜索失败: %s", exc, exc_info=True)

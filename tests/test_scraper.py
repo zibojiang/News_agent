@@ -4,10 +4,35 @@ import unittest
 from concurrent.futures import Future
 from unittest.mock import patch
 
-from scraper import fetch_and_extract_batch
+from scraper import fetch_and_extract_batch, fetch_latest_news
 
 
 class ScraperBatchTestCase(unittest.TestCase):
+    def test_merges_english_news_and_prioritizes_authoritative_sources(self) -> None:
+        requested_urls = []
+
+        def fetch_source(_url: str, _limit: int, source_name: str):
+            requested_urls.append(_url)
+            if source_name == "Google News 中文":
+                return [
+                    {"title": "中文行业新闻", "url": "https://example.cn/1", "source": "普通媒体"},
+                    {"title": "中文权威新闻", "url": "https://example.cn/2", "source": "新华社"},
+                ]
+            return [
+                {"title": "English industry report", "url": "https://reuters.com/1", "source": "Reuters"},
+            ]
+
+        with patch("scraper._fetch_rss_news", side_effect=fetch_source):
+            results = fetch_latest_news(
+                "复星AI",
+                max_articles=3,
+                english_query="Fosun AI",
+            )
+
+        self.assertEqual(results[0]["source"], "Reuters")
+        self.assertTrue(any(item.get("language") == "en" for item in results))
+        self.assertTrue(any("q=Fosun+AI" in url for url in requested_urls))
+
     def test_resolves_each_candidate_once_inside_parallel_extraction(self) -> None:
         item = {
             "title": "测试新闻",

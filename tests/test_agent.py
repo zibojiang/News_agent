@@ -178,6 +178,8 @@ class AgentEvidenceTestCase(unittest.TestCase):
         self.assertEqual(summary["saved"], 0)
         self.assertEqual(summary["unqualified"], 1)
         self.assertEqual(summary["details"][0]["storage_status"], "已新增")
+        self.assertEqual(summary["details"][0]["summary"], "测试摘要")
+        self.assertIn("dimension_scores", summary["details"][0]["quality_details"])
 
     def test_pipeline_surfaces_article_analysis_failure(self) -> None:
         article = {
