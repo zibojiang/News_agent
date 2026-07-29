@@ -11,6 +11,7 @@ from quality_scorer import (
     compute_penalties,
     compute_quality_label,
     score_article_pre_ai,
+    apply_ai_source_score,
     enrich_with_ai_result,
     QualitySummary,
     QualityPenalty,
@@ -253,6 +254,21 @@ class TestPreAI(unittest.TestCase):
 
 
 class TestAIEnrichment(unittest.TestCase):
+    def test_ai_source_score_replaces_rule_estimate_in_base_score(self):
+        summary = QualitySummary(
+            total_score=35,
+            dimension_scores={
+                "source_credibility": 10,
+                "content_density": 10,
+                "data_richness": 10,
+                "freshness": 5,
+            },
+        )
+        apply_ai_source_score(summary, 21, "国家级科技媒体")
+        self.assertEqual(summary.dimension_scores["source_credibility"], 21)
+        self.assertEqual(summary.total_score, 46)
+        self.assertEqual(summary.source_score_method, "ai")
+
     def test_ai_source_score_overrides_rule_score_and_is_bounded(self):
         summary = QualitySummary(
             total_score=30,
@@ -267,6 +283,7 @@ class TestAIEnrichment(unittest.TestCase):
             },
         )
         self.assertEqual(enriched.dimension_scores["source_credibility"], 25)
+        self.assertEqual(enriched.source_score_method, "ai")
         self.assertIn("AI 评估", enriched.dimension_reasons["source_credibility"])
         self.assertIn("IBM", enriched.dimension_reasons["source_credibility"])
 
