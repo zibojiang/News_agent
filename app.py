@@ -26,6 +26,10 @@ load_dotenv(
 
 from access_control import is_cloud_demo
 from agent import (
+    BODY_ANALYSIS_RELEVANCE_THRESHOLD,
+    SEARCH_RELEVANCE_DISPLAY_THRESHOLD,
+    analyze_search_intent,
+    fallback_search_intent,
     fetch_and_pre_score,
     get_ai_provider,
     get_gemini_model,
@@ -511,6 +515,27 @@ def _render_score_breakdown(quality_details: dict) -> None:
         st.caption(f"⚠️ 扣分 {penalty.get('deduction', 0)}：{penalty.get('reason', '')}")
 
 
+def _render_search_relevance(
+    article: dict[str, Any],
+    result: dict[str, Any] | None = None,
+) -> None:
+    """展示独立于新闻质量分的搜索相关性初筛结果。"""
+    raw_score = article.get("search_relevance_score")
+    if raw_score is None and result:
+        raw_score = result.get("score")
+    if raw_score is None:
+        return
+    relevance = _bounded_dimension_score(raw_score, 100)
+    reason = str(
+        article.get("search_relevance_reason")
+        or (result or {}).get("relevance_reason", "")
+    )
+    st.markdown(f"#### 🎯 搜索相关性 {relevance}/100")
+    if reason:
+        st.caption(reason)
+    st.caption("搜索相关性用于筛选和排序，不计入新闻质量基础分 50 分。")
+
+
 def _quality_value(quality: Any, key: str, default: Any = None) -> Any:
     """同时兼容运行时 QualitySummary 和数据库恢复后的字典。"""
     if isinstance(quality, dict):
@@ -555,6 +580,7 @@ def _persist_latest_search(
     articles: list[dict[str, Any]],
     results: dict[int, dict[str, Any]] | None = None,
     run_summary: dict[str, Any] | None = None,
+    search_intent: dict[str, Any] | None = None,
 ) -> None:
     """保存恢复卡片所需的最小状态，不重复保存整篇正文。"""
     stored_articles = []
@@ -570,6 +596,13 @@ def _persist_latest_search(
                 "quality_pre": _quality_state(article.get("quality_pre")),
                 "source_ai_scored": bool(article.get("source_ai_scored", False)),
                 "source_ai_error": str(article.get("source_ai_error", "")),
+                "search_relevance_score": article.get("search_relevance_score"),
+                "search_relevance_reason": str(
+                    article.get("search_relevance_reason", "")
+                ),
+                "search_relevance_scored": bool(
+                    article.get("search_relevance_scored", False)
+                ),
             }
         )
     summary_state = {
@@ -582,6 +615,7 @@ def _persist_latest_search(
         "articles": stored_articles,
         "results": results or {},
         "run_summary": summary_state,
+        "search_intent": search_intent or {},
     }
     try:
         save_last_search_state(state)
@@ -599,6 +633,14 @@ def _completed_search_uses_current_scoring(
     if not isinstance(results, dict) or not results:
         return False
     if any(not isinstance(article, dict) for article in articles):
+        return False
+    if any(
+        article.get("search_relevance_scored") is not True
+        or isinstance(article.get("search_relevance_score"), bool)
+        or not isinstance(article.get("search_relevance_score"), (int, float))
+        or not 0 <= article["search_relevance_score"] <= 100
+        for article in articles
+    ):
         return False
     if any(
         not _is_current_quality_details(
@@ -627,6 +669,7 @@ def _clear_search_session() -> None:
         "fetched_articles",
         "fetched_results",
         "fetched_keyword",
+        "fetched_search_intent",
         "last_run_summary",
     ):
         st.session_state.pop(key, None)
@@ -677,6 +720,8 @@ def _restore_latest_search() -> None:
     st.session_state.fetched_articles = articles
     st.session_state.fetched_keyword = keyword
     st.session_state.last_search_keyword = keyword
+    if isinstance(state.get("search_intent"), dict):
+        st.session_state.fetched_search_intent = state["search_intent"]
     if results:
         st.session_state.fetched_results = results
     if isinstance(state.get("run_summary"), dict) and state["run_summary"]:
@@ -702,12 +747,31 @@ def _render_article_cards(
     for article in articles:
         pre_state = _quality_state(article.get("quality_pre"))
         if _is_current_quality_details(pre_state, require_body=False):
+            pre_dimensions = pre_state.get("dimension_scores", {})
             current_pre_scores.append(
-                _bounded_dimension_score(pre_state.get("adjusted_score"), 50)
+                sum(
+                    _bounded_dimension_score(
+                        pre_dimensions.get(key),
+                        maximum,
+                    )
+                    for key, (_, maximum) in BASE_QUALITY_DIMENSIONS.items()
+                )
             )
-    analyzed_count = len(results) if results else 0
+    analyzed_count = sum(
+        1
+        for result in (results or {}).values()
+        if result.get("analysis_status") == "成功"
+    )
+    relevance_skipped_count = sum(
+        1
+        for result in (results or {}).values()
+        if result.get("analysis_status") == "跳过"
+    )
 
     st.markdown(f"### 📰 已搜索到的文章（{len(articles)}篇）")
+    intent = st.session_state.get("fetched_search_intent", {})
+    if isinstance(intent, dict) and intent.get("intent_summary"):
+        st.info(f"🧠 AI 理解的搜索目标：{intent['intent_summary']}")
     if results:
         current_final_scores = [
             _bounded_dimension_score(result.get("quality_score"), 100)
@@ -718,6 +782,10 @@ def _render_article_cards(
             )
         ]
         summary_parts = [f"已完成 AI 分析 {analyzed_count}/{len(articles)} 篇"]
+        if relevance_skipped_count:
+            summary_parts.append(
+                f"相关性不足跳过 {relevance_skipped_count} 篇"
+            )
         if current_pre_scores:
             summary_parts.append(
                 f"基础均分 {sum(current_pre_scores) // len(current_pre_scores)}/50"
@@ -730,13 +798,13 @@ def _render_article_cards(
     else:
         if len(current_pre_scores) == len(articles):
             st.caption(
-                "来源权威度 AI 评分已完成，基础分已生成；"
+                "搜索相关性与来源权威度 AI 初筛已完成，基础分已生成；"
                 "正文质量分析会继续进行。"
             )
         else:
             st.caption(
                 "新闻已搜索到，可以先浏览标题和原文；"
-                "AI 将先评估来源权威度，再生成基础分。"
+                "AI 将先评估搜索相关性与来源权威度。"
             )
 
     for idx, article in enumerate(articles):
@@ -767,6 +835,9 @@ def _render_article_cards(
         published = str(article.get("published_at", ""))[:16]
         language_label = " · 🌐 英文" if article.get("language") == "en" else ""
         source_score = int(pre_dims.get("source_credibility", 0) or 0)
+        relevance = article.get("search_relevance_score")
+        if relevance is None and result:
+            relevance = result.get("score")
         source_label = ""
         if has_current_pre_score:
             if source_score >= 22:
@@ -796,8 +867,8 @@ def _render_article_cards(
                     st.write(summary_text)
             with cols[1]:
                 if result:
-                    relevance = result.get("score", 0) or 0
-                    st.metric("相关性", f"{relevance}分")
+                    relevance_score = _bounded_dimension_score(relevance, 100)
+                    st.metric("搜索相关性", f"{relevance_score}/100")
                     if has_current_final_score:
                         quality = _bounded_dimension_score(
                             result.get("quality_score"),
@@ -805,6 +876,11 @@ def _render_article_cards(
                         )
                         label = result.get("quality_label", "")
                         st.metric("综合质量", f"{quality}/100", label)
+                        recommendation = _bounded_dimension_score(
+                            result.get("recommendation_score"),
+                            100,
+                        )
+                        st.metric("推荐分", f"{recommendation}/100")
                     elif has_current_pre_score:
                         st.metric("基础分", f"{pre_score}/50")
                         st.caption("正文 AI 分析未完成，保留基础评分")
@@ -819,6 +895,11 @@ def _render_article_cards(
                     if has_current_pre_score:
                         st.metric("基础分", f"{pre_score}/50")
                         st.caption("AI 正文质量分析中…")
+                        if relevance is not None:
+                            st.metric(
+                                "搜索相关性",
+                                f"{_bounded_dimension_score(relevance, 100)}/100",
+                            )
                     elif is_current_pre_version:
                         st.metric("基础分", "计算中")
                         st.caption("AI 正在评估来源权威度…")
@@ -837,6 +918,13 @@ def _render_article_cards(
                     f" 查看完整评分｜{quality_score}/100 · {quality_label}"
                 )
                 with st.expander(expander_label):
+                    _render_search_relevance(article, result)
+                    recommendation = _bounded_dimension_score(
+                        result.get("recommendation_score"),
+                        100,
+                    )
+                    st.markdown(f"**推荐分 {recommendation}/100**")
+                    st.caption("推荐分 = 搜索相关性 × 60% + 综合质量 × 40%")
                     if isinstance(quality_json, dict):
                         _render_score_breakdown(quality_json)
                     else:
@@ -846,6 +934,7 @@ def _render_article_cards(
                         st.caption(f"判定理由：{reason}")
             elif has_current_pre_score:
                 with st.expander(f" 查看基础评分｜{pre_score}/50"):
+                    _render_search_relevance(article, result)
                     if pre_dims:
                         _render_score_breakdown(pre_state)
                     else:
@@ -1217,9 +1306,25 @@ def _render_search_page(cloud_demo: bool) -> None:
             st.session_state.pop("last_run_summary", None)
             st.session_state.pop("fetched_results", None)
             st.session_state.pop("fetched_articles", None)
+            st.session_state.pop("fetched_search_intent", None)
             st.session_state.pop("pending_analysis", None)
             live_articles: list[dict[str, Any]] = []
             live_result_area = st.empty()
+            search_started = perf_counter()
+
+            try:
+                with st.spinner("🧠 AI 正在理解你想了解的新闻方向…"):
+                    search_intent_model = analyze_search_intent(keyword)
+                intent_fallback_reason = ""
+            except Exception as exc:
+                logger.warning("AI 搜索意图理解失败，使用原始查询: %s", exc)
+                search_intent_model = fallback_search_intent(
+                    keyword,
+                    english_query=english_keyword.strip() or None,
+                )
+                intent_fallback_reason = str(exc)
+            search_intent = search_intent_model.model_dump()
+            st.session_state.fetched_search_intent = search_intent
 
             def show_found_article(
                 article: dict[str, Any], found: int, total: int
@@ -1229,7 +1334,6 @@ def _render_search_page(cloud_demo: bool) -> None:
                 with live_result_area.container():
                     _render_article_cards(live_articles, keyword)
 
-            search_started = perf_counter()
             with st.spinner(f"正在搜索「{keyword}」相关的新闻…"):
                 try:
                     articles = fetch_and_pre_score(
@@ -1237,6 +1341,8 @@ def _render_search_page(cloud_demo: bool) -> None:
                         max_articles=int(max_articles),
                         article_callback=show_found_article,
                         english_keyword=english_keyword.strip() or None,
+                        additional_queries=search_intent_model.chinese_queries,
+                        english_queries=search_intent_model.english_queries,
                     )
                 except Exception as exc:
                     logger.error("搜索失败: %s", exc, exc_info=True)
@@ -1247,13 +1353,19 @@ def _render_search_page(cloud_demo: bool) -> None:
             if articles:
                 st.session_state.fetched_articles = articles
                 st.session_state.fetched_keyword = keyword
-                _persist_latest_search(keyword, articles)
+                _persist_latest_search(
+                    keyword,
+                    articles,
+                    search_intent=search_intent,
+                )
                 st.session_state.pending_analysis = {
                     "stage": "source",
                     "keyword": keyword,
                     "min_score": int(min_score),
                     "max_articles": int(max_articles),
                     "search_seconds": search_seconds,
+                    "search_intent": search_intent,
+                    "intent_fallback_reason": intent_fallback_reason,
                 }
                 st.rerun()
             else:
@@ -1271,8 +1383,8 @@ def _render_search_page(cloud_demo: bool) -> None:
         if pending_analysis:
             stage = pending_analysis.get("stage", "source")
             if stage == "source":
-                st.markdown("### AI 正在评估来源权威度")
-                progress_text = "新闻已展示，正在生成来源 AI 评分…"
+                st.markdown("### AI 正在初筛搜索相关性与来源")
+                progress_text = "新闻已展示，正在生成相关性和来源 AI 评分…"
             else:
                 st.markdown("### AI 正在分析新闻正文")
                 progress_text = "基础分已生成，正在分析正文质量…"
@@ -1285,8 +1397,30 @@ def _render_search_page(cloud_demo: bool) -> None:
                 if stage == "source":
                     source_errors = score_sources_with_ai(
                         articles,
+                        original_query=pending_analysis["keyword"],
+                        search_intent=pending_analysis.get("search_intent"),
                         progress_callback=update_progress,
                     )
+                    visible_articles = [
+                        article
+                        for article in articles
+                        if article.get("search_relevance_scored") is not True
+                        or int(article.get("search_relevance_score", 0) or 0)
+                        >= SEARCH_RELEVANCE_DISPLAY_THRESHOLD
+                    ]
+                    filtered_count = len(articles) - len(visible_articles)
+                    articles[:] = visible_articles
+                    pending_analysis["relevance_filtered"] = filtered_count
+                    if not articles:
+                        st.session_state.pop("pending_analysis", None)
+                        st.session_state.fetched_articles = []
+                        save_last_search_state({})
+                        progress_bar.progress(1.0, text="搜索相关性初筛完成")
+                        st.warning(
+                            "本次找到的候选文章与搜索意图的相关性"
+                            f"均低于 {SEARCH_RELEVANCE_DISPLAY_THRESHOLD} 分，已不作为有效结果展示。"
+                        )
+                        return
                     st.session_state.fetched_articles = articles
                     pending_analysis["stage"] = "body"
                     pending_analysis["source_errors"] = source_errors
@@ -1294,8 +1428,12 @@ def _render_search_page(cloud_demo: bool) -> None:
                     _persist_latest_search(
                         pending_analysis["keyword"],
                         articles,
+                        search_intent=pending_analysis.get("search_intent"),
                     )
-                    progress_bar.progress(1.0, text="来源评分完成，基础分已生成")
+                    progress_bar.progress(
+                        1.0,
+                        text="相关性与来源初筛完成，基础分已生成",
+                    )
                     st.rerun()
 
                 st.session_state.pop("pending_analysis", None)
@@ -1308,20 +1446,62 @@ def _render_search_page(cloud_demo: bool) -> None:
                     trigger_type="manual",
                     progress_callback=update_progress,
                     pre_fetched_articles=articles,
+                    pre_screen_completed=True,
                 )
                 run_summary["search_seconds"] = pending_analysis["search_seconds"]
                 run_summary["analysis_seconds"] = perf_counter() - analysis_started
+                run_summary["relevance_filtered"] = pending_analysis.get(
+                    "relevance_filtered", 0
+                )
+                details = list(run_summary.get("details", []))
+                ranked_pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+                for index, article in enumerate(articles):
+                    if index < len(details):
+                        detail = details[index]
+                    else:
+                        detail = {
+                            "title": str(article.get("title", "")),
+                            "url": str(article.get("url", "")),
+                            "score": article.get("search_relevance_score"),
+                            "analysis_status": "未完成",
+                            "qualification_status": "-",
+                            "storage_status": "未写入",
+                            "reason": "分析任务提前结束",
+                        }
+                    ranked_pairs.append((article, detail))
+
+                def ranking_score(
+                    pair: tuple[dict[str, Any], dict[str, Any]],
+                ) -> float:
+                    _, detail = pair
+                    recommendation = detail.get("recommendation_score")
+                    if isinstance(recommendation, (int, float)) and not isinstance(
+                        recommendation, bool
+                    ):
+                        return float(recommendation)
+                    relevance = detail.get("score", 0)
+                    if isinstance(relevance, (int, float)) and not isinstance(
+                        relevance, bool
+                    ):
+                        return float(relevance) * 0.6
+                    return -1.0
+
+                ranked_pairs.sort(key=ranking_score, reverse=True)
+                articles[:] = [article for article, _ in ranked_pairs]
+                run_summary["details"] = [detail for _, detail in ranked_pairs]
                 st.session_state.last_run_summary = run_summary
                 result_map = {
                     index: detail
                     for index, detail in enumerate(run_summary.get("details", []))
                 }
+                st.session_state.fetched_articles = articles
                 st.session_state.fetched_results = result_map
                 _persist_latest_search(
                     pending_analysis["keyword"],
                     articles,
                     result_map,
                     run_summary,
+                    search_intent=pending_analysis.get("search_intent"),
                 )
                 progress_bar.progress(1.0, text="分析完成")
                 st.rerun()

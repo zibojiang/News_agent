@@ -120,15 +120,51 @@ class AgentEvidenceTestCase(unittest.TestCase):
             return_value=SourceCredibilitySchema(
                 score=19,
                 reason="具有明确编辑责任的行业媒体",
+                relevance_score=86,
+                relevance_reason="新闻核心事件与搜索主题直接相关",
             ),
         ):
-            errors = score_sources_with_ai([article])
+            errors = score_sources_with_ai([article], original_query="测试主题")
 
         self.assertEqual(errors, [])
         quality = article["quality_pre"]
         self.assertEqual(quality.dimension_scores["source_credibility"], 19)
         self.assertEqual(quality.source_score_method, "ai")
         self.assertIn("AI 评估", quality.dimension_reasons["source_credibility"])
+        self.assertEqual(article["search_relevance_score"], 86)
+        self.assertTrue(article["search_relevance_scored"])
+
+    def test_pipeline_skips_body_ai_when_search_relevance_is_low(self) -> None:
+        article = {
+            "title": "间接相关新闻",
+            "url": "https://example.com/news/low-relevance",
+            "content": "这是一篇与用户问题只有间接关系的新闻正文。" * 20,
+            "content_hash": "hash-low-relevance",
+            "source": "测试媒体",
+            "published_at": "2026-07-20 10:00:00",
+            "search_relevance_score": 55,
+            "search_relevance_reason": "仅提及外围主题",
+            "search_relevance_scored": True,
+        }
+
+        with (
+            patch("agent.score_sources_with_ai") as score_sources,
+            patch("agent.analyze_article") as analyze,
+            patch("agent.append_cases_batch_with_summary") as append_batch,
+            patch("agent.record_task_run", return_value=1),
+        ):
+            summary = run_pipeline(
+                "数字集成电路产业新方向",
+                pre_fetched_articles=[article],
+                pre_screen_completed=True,
+            )
+
+        score_sources.assert_not_called()
+        analyze.assert_not_called()
+        append_batch.assert_not_called()
+        self.assertEqual(summary["relevance_skipped"], 1)
+        self.assertEqual(summary["analyzed"], 0)
+        self.assertEqual(summary["details"][0]["analysis_status"], "跳过")
 
     def test_routes_analysis_to_openai(self) -> None:
         expected = NewsCaseSchema(

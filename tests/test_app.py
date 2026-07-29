@@ -104,6 +104,9 @@ class AppSmokeTestCase(unittest.TestCase):
                         "articles": [
                             {
                                 "title": "当前规则评分新闻",
+                                "search_relevance_score": 88,
+                                "search_relevance_reason": "直接回答搜索问题",
+                                "search_relevance_scored": True,
                                 "quality_pre": {
                                     "adjusted_score": 40,
                                     "dimension_scores": dimensions,
@@ -123,6 +126,7 @@ class AppSmokeTestCase(unittest.TestCase):
                                 "summary": "当前规则生成的摘要。",
                                 "quality_score": 82,
                                 "quality_label": "质量良好",
+                                "recommendation_score": 86,
                                 "quality_details": {
                                     "adjusted_score": 82,
                                     "dimension_scores": {
@@ -173,6 +177,9 @@ class AppSmokeTestCase(unittest.TestCase):
                         "articles": [
                             {
                                 "title": "基础评分细则测试新闻",
+                                "search_relevance_score": 76,
+                                "search_relevance_reason": "与搜索主题明显相关",
+                                "search_relevance_scored": True,
                                 "quality_pre": {
                                     "total_score": 41,
                                     "adjusted_score": 41,
@@ -199,7 +206,7 @@ class AppSmokeTestCase(unittest.TestCase):
                             "0": {
                                 "analysis_status": "失败",
                                 "storage_status": "未写入",
-                                "score": 0,
+                                "score": 76,
                                 "reason": "正文 AI 暂时失败",
                             }
                         },
@@ -259,6 +266,9 @@ class AppSmokeTestCase(unittest.TestCase):
                         "url": "https://example.com/news",
                         "source": "测试媒体",
                         "published_at": "2026-07-29 10:00:00",
+                        "search_relevance_score": 88,
+                        "search_relevance_reason": "直接命中搜索主题",
+                        "search_relevance_scored": True,
                         "quality_pre": {
                             "adjusted_score": 40,
                             "total_score": 40,
@@ -285,6 +295,7 @@ class AppSmokeTestCase(unittest.TestCase):
                         "summary": "这是一条用于卡片展示的 AI 新闻摘要。",
                         "quality_score": 85,
                         "quality_label": "高质量",
+                        "recommendation_score": 87,
                         "quality_details": {
                             "total_score": 85,
                             "adjusted_score": 85,

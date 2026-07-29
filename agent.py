@@ -73,6 +73,8 @@ RETRY_BASE_DELAY = 2.0  # 秒，指数退避基数
 
 # 定时任务默认相关性分数门槛
 DEFAULT_MIN_SCORE = 70
+SEARCH_RELEVANCE_DISPLAY_THRESHOLD = 40
+BODY_ANALYSIS_RELEVANCE_THRESHOLD = 60
 
 
 class SearchIntentSchema(BaseModel):
@@ -385,9 +387,137 @@ def _prepare_analysis_prompts(
     return system_prompt, user_prompt
 
 
-SOURCE_CREDIBILITY_SYSTEM_PROMPT = """你是一名新闻来源审查员。
+SEARCH_INTENT_SYSTEM_PROMPT = """你是一名新闻检索策略师。
+请理解用户问题背后真正想了解的新闻主题，并产生简洁、可用于新闻搜索引擎的
+中英文检索词。保留用户的核心主题，可补充“新趋势、技术路线、市场、政策、产业化”等
+与问题直接相关的角度，但不得凭空限定某家企业、某项技术或某个结论。
+中文检索词返回 1-3 个，英文检索词返回 1-2 个；每个检索词都要尽量短。
+相关性标准必须能用来判断一篇新闻是否回答了用户的问题。"""
 
-只评估新闻原始信息来源的权威度，不分析新闻主题相关性或正文写作质量。
+
+def fallback_search_intent(
+    query: str,
+    english_query: str | None = None,
+) -> SearchIntentSchema:
+    """AI 意图理解失败时保留原始查询，不阻断新闻搜索。"""
+    cleaned_query = query.strip()
+    return SearchIntentSchema(
+        intent_summary=f"查找与“{cleaned_query}”直接相关的最新新闻与产业信息",
+        target_topics=[cleaned_query],
+        chinese_queries=[cleaned_query],
+        english_queries=[(english_query or cleaned_query).strip()],
+        relevance_criteria=[
+            f"新闻核心事件与“{cleaned_query}”直接相关",
+            "正文提供能回答搜索问题的事实、趋势或数据",
+        ],
+    )
+
+
+def analyze_search_intent(
+    query: str,
+    provider: str | None = None,
+    model: str | None = None,
+) -> SearchIntentSchema:
+    """在抓取前理解用户问题，生成中英文新闻检索词。"""
+    cleaned_query = query.strip()
+    if not cleaned_query:
+        raise ValueError("搜索内容不能为空")
+    provider_name = (provider or get_ai_provider()).strip().lower()
+    if provider_name not in {"openai", "gemini", "deepseek"}:
+        raise ValueError(
+            f"不支持的 AI_PROVIDER：{provider_name}，可选值为 openai、gemini 或 deepseek"
+        )
+    model_name = (
+        model or get_gemini_model()
+        if provider_name == "gemini"
+        else model or get_openai_model()
+    )
+    user_prompt = f"【用户原始搜索】{cleaned_query}"
+    last_error = "AI 未返回有效的搜索意图"
+
+    for attempt in range(1, 3):
+        try:
+            if provider_name == "gemini":
+                response = _get_gemini_client().models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Content(
+                            role="user",
+                            parts=[
+                                types.Part(text=SEARCH_INTENT_SYSTEM_PROMPT),
+                                types.Part(text=user_prompt),
+                            ],
+                        )
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=SearchIntentSchema,
+                        temperature=0.1,
+                    ),
+                )
+                if not response.text:
+                    raise ValueError("Gemini 返回空响应")
+                return SearchIntentSchema.model_validate_json(response.text)
+
+            client = _get_openai_client()
+            if provider_name == "openai":
+                response = client.responses.parse(
+                    model=model_name,
+                    input=[
+                        {"role": "system", "content": SEARCH_INTENT_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    text_format=SearchIntentSchema,
+                )
+                if response.output_parsed is None:
+                    raise ValueError("OpenAI 返回空响应")
+                return response.output_parsed
+
+            thinking_mode = os.getenv(
+                "DEEPSEEK_THINKING", "disabled"
+            ).strip().lower()
+            if thinking_mode not in {"enabled", "disabled"}:
+                thinking_mode = "disabled"
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SEARCH_INTENT_SYSTEM_PROMPT
+                        + "\nRespond with a valid JSON object.",
+                    },
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+                extra_body={"thinking": {"type": thinking_mode}},
+            )
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError("DeepSeek 返回空响应")
+            return SearchIntentSchema.model_validate(json.loads(content))
+        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            last_error = f"搜索意图结构化输出无效（{type(exc).__name__}）"
+        except Exception as exc:
+            if provider_name == "gemini":
+                last_error = _classify_gemini_error(exc, model_name)
+            else:
+                last_error = _classify_openai_error(exc, model_name)
+        if attempt < 2:
+            time.sleep(1.0)
+
+    raise ArticleAnalysisError(f"搜索意图 AI 理解失败：{last_error}")
+
+
+SOURCE_CREDIBILITY_SYSTEM_PROMPT = """你是一名新闻搜索初筛审查员。
+
+你需要独立完成两项评分：
+1. relevance_score（0-100）：新闻是否直接回答用户的搜索意图。不要因为只出现一两个相同词就给高分。
+   - 80-100：核心事件与搜索问题直接对应
+   - 60-79：明显相关，能提供部分有用答案
+   - 40-59：只有间接关系或主题偏离
+   - 0-39：基本无关、同词异义或无法回答问题
+2. score（0-25）：新闻原始信息来源的权威度。不分析正文写作质量。
+
 不要把 Google News、Bing、RSS 等聚合页当作原始发布者。结合提供的来源名、
 最终文章域名、标题和正文开头判断，并严格返回 0-25 分：
 
@@ -398,27 +528,44 @@ SOURCE_CREDIBILITY_SYSTEM_PROMPT = """你是一名新闻来源审查员。
 - 0-7：内容农场、个人博客、无原始出处的聚合站或明显可疑来源
 
 企业官方材料具有一手性，但应考虑自述偏向。不得编造机构背景、奖项、受众规模
-或编辑制度。reason 必须简短说明可核对的判断依据。"""
+或编辑制度。reason 和 relevance_reason 必须简短说明可核对的判断依据。"""
 
 
-def _build_source_credibility_prompt(article: dict[str, Any]) -> str:
-    """组装独立来源权威度评分所需的最小输入。"""
+def _build_source_credibility_prompt(
+    article: dict[str, Any],
+    original_query: str = "",
+    search_intent: SearchIntentSchema | dict[str, Any] | None = None,
+) -> str:
+    """组装搜索相关性与来源权威度初筛输入。"""
     content_excerpt = str(article.get("content", "")).strip()[:1500]
-    return f"""【来源名称】{article.get('source', '未知来源')}
+    if isinstance(search_intent, SearchIntentSchema):
+        intent_data = search_intent.model_dump()
+    elif isinstance(search_intent, dict):
+        intent_data = search_intent
+    else:
+        intent_data = fallback_search_intent(original_query or "当前搜索").model_dump()
+    return f"""【用户原始搜索】{original_query}
+【AI 理解的搜索意图】{intent_data.get('intent_summary', '')}
+【目标主题】{' / '.join(intent_data.get('target_topics', []) or [])}
+【相关性判断标准】{' / '.join(intent_data.get('relevance_criteria', []) or [])}
+
+【来源名称】{article.get('source', '未知来源')}
 【文章网址】{article.get('url', '')}
 【新闻标题】{article.get('title', '')}
 【正文开头】
 {content_excerpt}
 
-请只输出 score 和 reason 字段。"""
+请只输出 score、reason、relevance_score 和 relevance_reason 字段。"""
 
 
 def analyze_source_credibility(
     article: dict[str, Any],
     provider: str | None = None,
     model: str | None = None,
+    original_query: str = "",
+    search_intent: SearchIntentSchema | dict[str, Any] | None = None,
 ) -> SourceCredibilitySchema:
-    """先于正文分析，使用当前 AI 提供方独立评估来源权威度。"""
+    """先于正文分析，评估搜索相关性与来源权威度。"""
     provider_name = (provider or get_ai_provider()).strip().lower()
     if provider_name not in {"openai", "gemini", "deepseek"}:
         raise ValueError(
@@ -429,7 +576,11 @@ def analyze_source_credibility(
         model_name = model or get_gemini_model()
     else:
         model_name = model or get_openai_model()
-    user_prompt = _build_source_credibility_prompt(article)
+    user_prompt = _build_source_credibility_prompt(
+        article,
+        original_query=original_query,
+        search_intent=search_intent,
+    )
     last_error = "AI 未返回有效的来源权威度评分"
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -507,15 +658,18 @@ def analyze_source_credibility(
 
 def score_sources_with_ai(
     articles: list[dict[str, Any]],
+    original_query: str = "",
+    search_intent: SearchIntentSchema | dict[str, Any] | None = None,
     progress_callback: Callable[[str, float], None] | None = None,
 ) -> list[str]:
-    """并行生成来源 AI 分数并更新文章的 50 分基础评分。"""
+    """并行生成搜索相关性和来源 AI 分数。"""
     pending_indexes = [
         index
         for index, article in enumerate(articles)
         if not (
             isinstance(article.get("quality_pre"), QualitySummary)
             and article["quality_pre"].source_score_method == "ai"
+            and article.get("search_relevance_scored") is True
         )
     ]
     if not pending_indexes:
@@ -525,12 +679,17 @@ def score_sources_with_ai(
     errors: list[str] = []
     _notify_progress(
         progress_callback,
-        f"AI 正在评估 {len(pending_indexes)} 个新闻来源（{worker_count} 路）…",
+        f"AI 正在初筛 {len(pending_indexes)} 篇新闻的相关性与来源（{worker_count} 路）…",
         0.05,
     )
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
-            executor.submit(analyze_source_credibility, articles[index]): index
+            executor.submit(
+                analyze_source_credibility,
+                articles[index],
+                original_query=original_query,
+                search_intent=search_intent,
+            ): index
             for index in pending_indexes
         }
         completed = 0
@@ -553,6 +712,9 @@ def score_sources_with_ai(
                     article["quality_pre"] = pre_score
                 apply_ai_source_score(pre_score, result.score, result.reason)
                 article["source_ai_scored"] = True
+                article["search_relevance_score"] = result.relevance_score
+                article["search_relevance_reason"] = result.relevance_reason
+                article["search_relevance_scored"] = True
                 article.pop("source_ai_error", None)
             except Exception as exc:
                 reason = str(exc)
@@ -562,9 +724,13 @@ def score_sources_with_ai(
             completed += 1
             _notify_progress(
                 progress_callback,
-                f"来源权威度已完成 {completed}/{len(pending_indexes)} 篇…",
+                f"相关性与来源初筛已完成 {completed}/{len(pending_indexes)} 篇…",
                 completed / len(pending_indexes),
             )
+    articles.sort(
+        key=lambda article: int(article.get("search_relevance_score", -1) or 0),
+        reverse=True,
+    )
     return errors
 
 
@@ -973,6 +1139,8 @@ def fetch_and_pre_score(
     max_articles: int = 8,
     article_callback: Callable[[dict[str, Any], int, int], None] | None = None,
     english_keyword: str | None = None,
+    additional_queries: list[str] | None = None,
+    english_queries: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """抓取新闻列表并执行预 AI 质量评分（纯算法），返回文章列表供前端展示。
 
@@ -984,6 +1152,8 @@ def fetch_and_pre_score(
         max_articles: 单次最多处理文章数
         article_callback: 每找到一篇有效文章时的回调
         english_keyword: 可选英文检索词
+        additional_queries: AI 意图理解生成的额外中文检索词
+        english_queries: AI 意图理解生成的英文检索词
 
     Returns:
         已含 quality_pre 字段的文章列表
@@ -1006,6 +1176,8 @@ def fetch_and_pre_score(
         max_articles=max_articles,
         article_callback=score_and_notify,
         english_query=english_keyword,
+        additional_queries=additional_queries,
+        english_queries=english_queries,
     )
 
     # 兼容自定义抓取器或测试替身没有执行回调的情况。
@@ -1073,6 +1245,7 @@ def run_pipeline(
     trigger_type: str = "manual",
     progress_callback: Callable[[str, float], None] | None = None,
     pre_fetched_articles: list[dict[str, Any]] | None = None,
+    pre_screen_completed: bool = False,
 ) -> dict[str, Any]:
     """
     执行完整的「抓取 → 提炼 → 入库」工作流。
@@ -1085,6 +1258,7 @@ def run_pipeline(
         trigger_type: 触发方式标识（manual / scheduled）
         progress_callback: 进度回调 (message, progress_float)
         pre_fetched_articles: 预先抓取的带 pre-AI 评分的文章列表，提供时跳过抓取阶段
+        pre_screen_completed: 调用方是否已执行过相关性与来源 AI 初筛
 
     Returns:
         运行摘要字典，包含 AI、新闻入库、案例入库及错误统计
@@ -1099,6 +1273,7 @@ def run_pipeline(
         "processed": 0,
         "source_scored": 0,
         "source_failed": 0,
+        "relevance_skipped": 0,
         "analyzed": 0,
         "analysis_failed": 0,
         "news_saved": 0,
@@ -1164,12 +1339,15 @@ def run_pipeline(
                     content_hash=str(article.get("content_hash", "")),
                 )
 
-        if any(
+        if not pre_screen_completed and any(
             article["quality_pre"].source_score_method != "ai"
+            or article.get("search_relevance_scored") is not True
             for article in articles
         ):
             source_errors = score_sources_with_ai(
                 articles,
+                original_query=industry_keyword,
+                search_intent=fallback_search_intent(industry_keyword),
                 progress_callback=lambda message, value: _notify_progress(
                     progress_callback,
                     message,
@@ -1192,15 +1370,32 @@ def run_pipeline(
         total_articles = len(articles)
         _notify_progress(
             progress_callback,
-            f"已提取 {total_articles} 篇正文，开始 AI 分析…",
+            f"已提取 {total_articles} 篇正文，开始相关新闻的 AI 正文分析…",
             0.15,
         )
-        analysis_outcomes = _analyze_articles_parallel(
-            articles,
+        eligible_indexes = [
+            index
+            for index, article in enumerate(articles)
+            if article.get("search_relevance_scored") is not True
+            or int(article.get("search_relevance_score", 0) or 0)
+            >= BODY_ANALYSIS_RELEVANCE_THRESHOLD
+        ]
+        eligible_articles = [articles[index] for index in eligible_indexes]
+        eligible_outcomes = _analyze_articles_parallel(
+            eligible_articles,
             industry_keyword,
             topic,
             progress_callback,
         )
+        analysis_outcomes: list[NewsCaseSchema | Exception | None] = [
+            None
+        ] * total_articles
+        for article_index, outcome in zip(
+            eligible_indexes,
+            eligible_outcomes,
+            strict=False,
+        ):
+            analysis_outcomes[article_index] = outcome
 
         for index, article in enumerate(articles, start=1):
             summary["processed"] += 1
@@ -1213,6 +1408,25 @@ def run_pipeline(
                 "storage_status": "未写入",
                 "reason": "",
             }
+            if article.get("search_relevance_scored") is True:
+                screening_score = int(
+                    article.get("search_relevance_score", 0) or 0
+                )
+                detail["score"] = screening_score
+                detail["relevance_reason"] = str(
+                    article.get("search_relevance_reason", "")
+                )
+                if screening_score < BODY_ANALYSIS_RELEVANCE_THRESHOLD:
+                    detail["analysis_status"] = "跳过"
+                    detail["qualification_status"] = "相关性不足"
+                    detail["reason"] = (
+                        f"搜索相关性 {screening_score}/100，低于正文 AI "
+                        f"分析门槛 {BODY_ANALYSIS_RELEVANCE_THRESHOLD}"
+                    )
+                    summary["relevance_skipped"] += 1
+                    summary["skipped"] += 1
+                    summary["details"].append(detail)
+                    continue
             try:
                 outcome = analysis_outcomes[index - 1]
                 if isinstance(outcome, Exception):
@@ -1260,6 +1474,15 @@ def run_pipeline(
                 summary["details"].append(detail)
                 continue
 
+            if article.get("search_relevance_scored") is True:
+                result.relevance_score = int(
+                    article.get("search_relevance_score", 0) or 0
+                )
+            else:
+                article["search_relevance_score"] = result.relevance_score
+                article["search_relevance_reason"] = "由正文 AI 分析补充"
+                article["search_relevance_scored"] = True
+
             summary["analyzed"] += 1
             detail["score"] = result.relevance_score
             detail["analysis_status"] = "成功"
@@ -1299,8 +1522,14 @@ def run_pipeline(
                 quality = enrich_with_ai_result(pre_score, ai_data)
             else:
                 quality = QualitySummary()
+            if quality.source_score_method == "ai":
+                article["source_ai_scored"] = True
             detail["quality_score"] = quality.adjusted_score
             detail["quality_label"] = quality.label
+            recommendation_score = round(
+                result.relevance_score * 0.6 + quality.adjusted_score * 0.4
+            )
+            detail["recommendation_score"] = recommendation_score
 
             case_dict = {
                 "discovered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1349,6 +1578,11 @@ def run_pipeline(
                     "source_score_method": quality.source_score_method,
                     "score_cap": quality.score_cap,
                     "quality_warnings": quality.quality_warnings,
+                    "search_relevance_score": result.relevance_score,
+                    "search_relevance_reason": str(
+                        article.get("search_relevance_reason", "")
+                    ),
+                    "recommendation_score": recommendation_score,
                 },
             }
             detail["quality_details"] = case_dict["quality_details"]
