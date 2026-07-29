@@ -217,6 +217,23 @@ class TestPreAI(unittest.TestCase):
 
 
 class TestAIEnrichment(unittest.TestCase):
+    def test_ai_source_score_overrides_rule_score_and_is_bounded(self):
+        summary = QualitySummary(
+            total_score=30,
+            dimension_scores={"source_credibility": 10, "keyword_relevance": 20},
+            dimension_reasons={"source_credibility": "预筛规则分"},
+        )
+        enriched = enrich_with_ai_result(
+            summary,
+            {
+                "sourceCredibilityScore": 28,
+                "sourceCredibilityReason": "IBM 官方发布的一手研究报告",
+            },
+        )
+        self.assertEqual(enriched.dimension_scores["source_credibility"], 25)
+        self.assertIn("AI 评估", enriched.dimension_reasons["source_credibility"])
+        self.assertIn("IBM", enriched.dimension_reasons["source_credibility"])
+
     def test_enrich_adds_dimensions(self):
         summary = QualitySummary(total_score=50)
         ai = {

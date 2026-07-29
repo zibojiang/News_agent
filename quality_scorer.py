@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # 评分规则版本 — 变更时触发重新评分
 # ============================================================
-NEWS_QUALITY_RULE_VERSION = "v4"
+NEWS_QUALITY_RULE_VERSION = "v5"
 
 # ============================================================
 # 来源权威度配置（独立存放，便于扩展）
@@ -484,6 +484,17 @@ def enrich_with_ai_result(
     """用 AI 分析结果增强评分。"""
     if not ai_result or not isinstance(ai_result, dict):
         return summary
+
+    # AI 完成后覆盖预筛阶段的来源规则分，该维度仍最多 25 分。
+    source_score = ai_result.get("sourceCredibilityScore")
+    if isinstance(source_score, (int, float)) and not isinstance(source_score, bool):
+        source_score = max(0, min(25, int(round(source_score))))
+        source_reason = str(
+            ai_result.get("sourceCredibilityReason")
+            or "AI 根据原始发布者与官网信息评估"
+        )
+        summary.dimension_scores["source_credibility"] = source_score
+        summary.dimension_reasons["source_credibility"] = f"AI 评估：{source_reason}"
 
     # 标题-正文一致性（AI 评估）
     consistency = ai_result.get("headlineBodyConsistency")

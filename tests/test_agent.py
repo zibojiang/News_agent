@@ -51,6 +51,8 @@ class AgentEvidenceTestCase(unittest.TestCase):
             regions=["中国"],
             metric_tags=["营收"],
             relevance_score=85,
+            source_credibility_score=20,
+            source_credibility_reason="可验证的企业官网",
         )
         response = SimpleNamespace(
             choices=[
@@ -93,6 +95,8 @@ class AgentEvidenceTestCase(unittest.TestCase):
             regions=[],
             metric_tags=[],
             relevance_score=50,
+            source_credibility_score=10,
+            source_credibility_reason="来源信息有限",
         )
         with patch("agent.analyze_article_with_openai", return_value=expected) as call:
             result = analyze_article(
@@ -146,6 +150,8 @@ class AgentEvidenceTestCase(unittest.TestCase):
             regions=["中国"],
             metric_tags=["营收"],
             relevance_score=60,
+            source_credibility_score=18,
+            source_credibility_reason="可验证的行业媒体",
         )
         write_summary = {
             "news_inserted": 1,
@@ -244,6 +250,8 @@ class AgentEvidenceTestCase(unittest.TestCase):
                 regions=[],
                 metric_tags=["营收"],
                 relevance_score=85,
+                source_credibility_score=20,
+                source_credibility_reason="可验证的主流来源",
             )
 
         write_summary = {

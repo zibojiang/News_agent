@@ -104,6 +104,14 @@ class NewsCaseSchema(BaseModel):
         le=100,
         description="0-100 的行业相关性打分，100 表示高度相关",
     )
+    source_credibility_score: int = Field(
+        ge=0,
+        le=25,
+        description="AI 对新闻原始发布来源的 0-25 权威度评分",
+    )
+    source_credibility_reason: str = Field(
+        description="AI 给出来源权威度分数的简短、可核对依据"
+    )
 
 
 class ArticleAnalysisError(RuntimeError):
@@ -186,10 +194,20 @@ ANALYST_SYSTEM_PROMPT = """你是一位资深商业分析师，擅长撰写行�
    - 50-69：间接相关或量化信息不足
    - 0-49：关联度低或缺乏商业价值
 
-5. **证据可追溯**：evidence_quotes 只能摘录输入正文中真实存在的短句，
+5. **source_credibility_score 来源权威度（0-25）**：
+   评估原始发布者，不要把 Google News、Bing 等聚合页当作原始来源。
+   结合官网域名、编辑/研究标准、一手资料属性、方法透明度和利益偏向评分：
+   - 23-25：政府、国际公共机构、顶级通讯社，或方法透明的顶级独立研究机构
+   - 19-22：大型主流媒体、专业研究机构、知名企业官方报告（一手但可能存在自述偏向）
+   - 14-18：可验证的行业媒体、一般企业官网或有明确编辑责任的来源
+   - 8-13：网站身份或编辑标准无法充分确认；信息不足时应保守评分
+   - 0-7：内容农场、个人博客、无原始出处的聚合站或明显可疑来源
+   source_credibility_reason 需说明判断依据；不得编造网站背景、奖项或影响力数据。
+
+6. **证据可追溯**：evidence_quotes 只能摘录输入正文中真实存在的短句，
    不得补全、改写或编造数字。
 
-6. 若正文无法提取有效量化案例，bullet_points 和 evidence_quotes 可为空数组，
+7. 若正文无法提取有效量化案例，bullet_points 和 evidence_quotes 可为空数组，
    relevance_score 应相应降低。
 
 请基于以下输入进行分析，并严格按 JSON Schema 返回结果。"""
@@ -243,7 +261,8 @@ def _build_user_prompt(
 {article_text}
 
 请输出 title、url、summary、bullet_points、evidence_quotes、
-involved_companies、regions、metric_tags、relevance_score 字段。
+involved_companies、regions、metric_tags、relevance_score、
+source_credibility_score、source_credibility_reason 字段。
 其中 title 和 url 请直接使用上方提供的值。"""
 
 
@@ -956,6 +975,8 @@ def run_pipeline(
             ai_data = {
                 "title": result.title,
                 "content": article.get("content", ""),
+                "sourceCredibilityScore": result.source_credibility_score,
+                "sourceCredibilityReason": result.source_credibility_reason,
                 "headlineBodyConsistency": getattr(result, "headline_body_consistency", None),
                 "originalReportingSignals": getattr(result, "original_reporting_signals", []),
                 "namedSourceCount": getattr(result, "named_source_count", 0),
