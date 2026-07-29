@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 import unittest
@@ -98,6 +99,94 @@ class AgentEvidenceTestCase(unittest.TestCase):
         self.assertEqual(result.english_queries, intent.english_queries)
         request = get_client.return_value.chat.completions.create.call_args.kwargs
         self.assertEqual(request["response_format"], {"type": "json_object"})
+        self.assertIn("JSON Schema", request["messages"][0]["content"])
+
+    def test_search_intent_normalizes_compatible_api_field_types(self) -> None:
+        malformed_intent = {
+            "intent_summary": "对比美国和中国 AI 产业的发展",
+            "target_topics": "美国AI产业与中国AI产业",
+            "chinese_queries": "美国AI产业 中国AI产业 对比",
+            "english_queries": "US China AI industry comparison",
+            "relevance_criteria": "新闻实质比较两国 AI 产业",
+            "scope_level": "目标较明确",
+            "needs_clarification": "false",
+            "clarification_question": None,
+            "interpretations": [],
+            "recommended_interpretation_index": None,
+        }
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(malformed_intent, ensure_ascii=False)
+                    )
+                )
+            ]
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AI_PROVIDER": "deepseek",
+                    "OPENAI_BASE_URL": "https://api.siliconflow.cn/v1",
+                },
+            ),
+            patch("agent._get_openai_client") as get_client,
+        ):
+            get_client.return_value.chat.completions.create.return_value = response
+            result = analyze_search_intent("美国AI产业与中国AI产业对比")
+
+        self.assertEqual(result.scope_level, "specific")
+        self.assertFalse(result.needs_clarification)
+        self.assertEqual(result.target_topics, ["美国AI产业与中国AI产业"])
+        self.assertEqual(
+            result.english_queries,
+            ["US China AI industry comparison"],
+        )
+
+    def test_search_intent_retries_with_format_feedback(self) -> None:
+        invalid_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content='{"message":"missing fields"}')
+                )
+            ]
+        )
+        valid_intent = SearchIntentSchema(
+            intent_summary="对比美国和中国 AI 产业的发展",
+            target_topics=["美国AI产业", "中国AI产业"],
+            chinese_queries=["美国 中国 AI 产业 对比"],
+            english_queries=["US China AI industry comparison"],
+            relevance_criteria=["新闻实质比较两国 AI 产业"],
+        )
+        valid_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=valid_intent.model_dump_json())
+                )
+            ]
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AI_PROVIDER": "deepseek",
+                    "OPENAI_BASE_URL": "https://api.siliconflow.cn/v1",
+                },
+            ),
+            patch("agent._get_openai_client") as get_client,
+            patch("agent.time.sleep"),
+        ):
+            get_client.return_value.chat.completions.create.side_effect = [
+                invalid_response,
+                valid_response,
+            ]
+            result = analyze_search_intent("美国AI产业与中国AI产业对比")
+
+        self.assertEqual(result.intent_summary, valid_intent.intent_summary)
+        calls = get_client.return_value.chat.completions.create.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertIn("格式修正", calls[1].kwargs["messages"][1]["content"])
 
     def test_search_intent_fallback_does_not_fake_english_translation(self) -> None:
         result = fallback_search_intent("海外产品+中国供应链研发")
@@ -179,6 +268,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
                 {
                     "AI_PROVIDER": "deepseek",
                     "DEEPSEEK_THINKING": "disabled",
+                    "OPENAI_BASE_URL": "https://api.deepseek.com",
                 },
             ),
             patch("agent._get_openai_client") as get_client,
@@ -195,6 +285,49 @@ class AgentEvidenceTestCase(unittest.TestCase):
         self.assertEqual(
             request["extra_body"], {"thinking": {"type": "disabled"}}
         )
+
+    def test_siliconflow_does_not_receive_deepseek_official_options(self) -> None:
+        analysis = NewsCaseSchema(
+            title="测试新闻",
+            url="https://example.com/news/1",
+            summary="测试摘要",
+            bullet_points=[],
+            evidence_quotes=[],
+            involved_companies=[],
+            regions=[],
+            metric_tags=[],
+            relevance_score=50,
+            source_credibility_score=10,
+            source_credibility_reason="来源信息有限",
+            body_quality=_body_quality(),
+        )
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=analysis.model_dump_json())
+                )
+            ]
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AI_PROVIDER": "deepseek",
+                    "OPENAI_BASE_URL": "https://api.siliconflow.cn/v1",
+                },
+            ),
+            patch("agent._get_openai_client") as get_client,
+        ):
+            get_client.return_value.chat.completions.create.return_value = response
+            analyze_article_with_chat_completions(
+                article_title=analysis.title,
+                article_url=analysis.url,
+                article_text="测试正文。",
+                industry_keyword="AI产业",
+            )
+
+        request = get_client.return_value.chat.completions.create.call_args.kwargs
+        self.assertNotIn("extra_body", request)
 
     def test_source_ai_score_is_applied_before_body_analysis(self) -> None:
         article = {

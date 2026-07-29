@@ -1359,7 +1359,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
     with st.container(border=True):
         if review.get("fallback_reason"):
             st.warning(
-                "AI 意图理解本次未成功，已先按关键词结构生成可确认的备用方案。"
+                "AI 本次未返回可用的搜索意图格式，已按关键词结构生成可确认的备用方案。"
             )
             st.caption(f"降级原因：{review['fallback_reason']}")
         scope = str(intent.get("scope_level", "specific"))

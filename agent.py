@@ -574,16 +574,25 @@ def _supports_openai_responses_api(provider_name: str) -> bool:
     return not base_url or "api.openai.com" in base_url
 
 
+def _uses_official_deepseek_api(provider_name: str) -> bool:
+    """仅 DeepSeek 官网接口接收其专用 thinking 参数。"""
+    if provider_name != "deepseek":
+        return False
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip().lower()
+    return "api.deepseek.com" in base_url
+
+
 def _request_chat_completion_json(
     client: OpenAI,
     model_name: str,
     system_prompt: str,
     user_prompt: str,
     provider_name: str,
+    response_schema: type[BaseModel] | None = None,
 ) -> dict[str, Any]:
     """使用 OpenAI 兼容的 Chat Completions 获取 JSON 对象。"""
     request_options: dict[str, Any] = {}
-    if provider_name == "deepseek":
+    if _uses_official_deepseek_api(provider_name):
         thinking_mode = os.getenv(
             "DEEPSEEK_THINKING", "disabled"
         ).strip().lower()
@@ -592,12 +601,24 @@ def _request_chat_completion_json(
         request_options["extra_body"] = {
             "thinking": {"type": thinking_mode}
         }
+    schema_instruction = "\nRespond with a valid JSON object."
+    if response_schema is not None:
+        schema_json = json.dumps(
+            response_schema.model_json_schema(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        schema_instruction += (
+            "\nThe JSON object must conform exactly to this JSON Schema. "
+            "Do not omit required fields or add a markdown code fence:\n"
+            f"{schema_json}"
+        )
     response = client.chat.completions.create(
         model=model_name,
         messages=[
             {
                 "role": "system",
-                "content": system_prompt + "\nRespond with a valid JSON object.",
+                "content": system_prompt + schema_instruction,
             },
             {"role": "user", "content": user_prompt},
         ],
@@ -611,6 +632,144 @@ def _request_chat_completion_json(
     if not isinstance(parsed, dict):
         raise ValueError("Chat Completions 未返回 JSON 对象")
     return parsed
+
+
+def _string_list(value: Any) -> list[str]:
+    """将模型常见的单字符串输出安全转换为字符串列表。"""
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    return [item.strip() for item in values if isinstance(item, str) and item.strip()]
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "yes", "1", "是", "需要"}:
+            return True
+        if normalized in {"false", "no", "0", "否", "不需要"}:
+            return False
+    return default
+
+
+def _normalize_scope_level(value: Any, query: str) -> str:
+    normalized = str(value or "").strip().casefold()
+    aliases = {
+        "broad": "broad",
+        "wide": "broad",
+        "宽泛": "broad",
+        "范围较广": "broad",
+        "focused": "focused",
+        "moderate": "focused",
+        "聚焦": "focused",
+        "目标较聚焦": "focused",
+        "specific": "specific",
+        "clear": "specific",
+        "具体": "specific",
+        "明确": "specific",
+        "目标较明确": "specific",
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    return "broad" if len(re.sub(r"\s+", "", query)) <= 6 else "specific"
+
+
+def _normalize_interpretation(
+    value: Any,
+    query: str,
+    index: int,
+) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    summary = str(value.get("intent_summary") or "").strip()
+    label = str(value.get("label") or summary or f"解释 {index + 1}").strip()
+    if not summary:
+        summary = label
+    topics = _string_list(value.get("target_topics")) or [query]
+    chinese_queries = _string_list(value.get("chinese_queries")) or [query]
+    criteria = _string_list(value.get("relevance_criteria")) or [
+        f"新闻核心内容与“{summary}”直接相关"
+    ]
+    return {
+        "label": label,
+        "description": str(value.get("description") or summary).strip(),
+        "intent_summary": summary,
+        "target_topics": topics,
+        "chinese_queries": chinese_queries,
+        "english_queries": _string_list(value.get("english_queries")),
+        "relevance_criteria": criteria,
+    }
+
+
+def _normalize_search_intent_payload(
+    payload: dict[str, Any],
+    query: str,
+) -> dict[str, Any]:
+    """修正常见兼容模型输出差异，但不凭空生成英文检索词。"""
+    data = dict(payload)
+    core_fields = {
+        "intent_summary",
+        "target_topics",
+        "chinese_queries",
+        "english_queries",
+        "relevance_criteria",
+    }
+    if not core_fields.intersection(data):
+        for wrapper_key in ("search_intent", "intent", "result", "data"):
+            wrapped = data.get(wrapper_key)
+            if isinstance(wrapped, dict):
+                data = dict(wrapped)
+                break
+    if not core_fields.intersection(data):
+        raise ValueError("搜索意图响应缺少核心字段")
+
+    summary = str(data.get("intent_summary") or "").strip()
+    if not summary:
+        summary = f"查找与“{query}”直接相关的最新新闻与产业信息"
+    interpretations = [
+        normalized
+        for index, item in enumerate(data.get("interpretations") or [])
+        if (normalized := _normalize_interpretation(item, query, index)) is not None
+    ][:4]
+    needs_clarification = _coerce_bool(
+        data.get("needs_clarification"),
+        default=bool(interpretations),
+    )
+    try:
+        recommended_index = int(data.get("recommended_interpretation_index") or 0)
+    except (TypeError, ValueError):
+        recommended_index = 0
+    if interpretations:
+        recommended_index = max(0, min(recommended_index, len(interpretations) - 1))
+    else:
+        recommended_index = 0
+
+    return {
+        "intent_summary": summary,
+        "target_topics": _string_list(data.get("target_topics")) or [query],
+        "chinese_queries": _string_list(data.get("chinese_queries")) or [query],
+        "english_queries": _string_list(data.get("english_queries")),
+        "relevance_criteria": _string_list(data.get("relevance_criteria"))
+        or [f"新闻核心内容与“{summary}”直接相关"],
+        "scope_level": _normalize_scope_level(data.get("scope_level"), query),
+        "needs_clarification": needs_clarification,
+        "clarification_question": str(
+            data.get("clarification_question") or ""
+        ).strip(),
+        "interpretations": interpretations,
+        "recommended_interpretation_index": recommended_index,
+    }
+
+
+def _validation_field_summary(exc: ValidationError) -> str:
+    fields = []
+    for error in exc.errors(include_url=False):
+        location = ".".join(str(part) for part in error.get("loc", ()))
+        if location and location not in fields:
+            fields.append(location)
+    return "、".join(fields[:5]) or "未知字段"
 
 
 def analyze_search_intent(
@@ -632,10 +791,12 @@ def analyze_search_intent(
         if provider_name == "gemini"
         else model or get_openai_model()
     )
-    user_prompt = f"【用户原始搜索】{cleaned_query}"
+    base_user_prompt = f"【用户原始搜索】{cleaned_query}"
+    retry_instruction = ""
     last_error = "AI 未返回有效的搜索意图"
 
     for attempt in range(1, 3):
+        user_prompt = base_user_prompt + retry_instruction
         try:
             if provider_name == "gemini":
                 response = _get_gemini_client().models.generate_content(
@@ -657,7 +818,11 @@ def analyze_search_intent(
                 )
                 if not response.text:
                     raise ValueError("Gemini 返回空响应")
-                return SearchIntentSchema.model_validate_json(response.text)
+                return SearchIntentSchema.model_validate(
+                    _normalize_search_intent_payload(
+                        json.loads(response.text), cleaned_query
+                    )
+                )
 
             client = _get_openai_client()
             if _supports_openai_responses_api(provider_name):
@@ -671,19 +836,51 @@ def analyze_search_intent(
                 )
                 if response.output_parsed is None:
                     raise ValueError("OpenAI 返回空响应")
-                return response.output_parsed
+                return SearchIntentSchema.model_validate(
+                    _normalize_search_intent_payload(
+                        response.output_parsed.model_dump(), cleaned_query
+                    )
+                )
 
             return SearchIntentSchema.model_validate(
-                _request_chat_completion_json(
-                    client,
-                    model_name,
-                    SEARCH_INTENT_SYSTEM_PROMPT,
-                    user_prompt,
-                    provider_name,
+                _normalize_search_intent_payload(
+                    _request_chat_completion_json(
+                        client,
+                        model_name,
+                        SEARCH_INTENT_SYSTEM_PROMPT,
+                        user_prompt,
+                        provider_name,
+                        response_schema=SearchIntentSchema,
+                    ),
+                    cleaned_query,
                 )
             )
-        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
-            last_error = f"搜索意图结构化输出无效（{type(exc).__name__}）"
+        except ValidationError as exc:
+            invalid_fields = _validation_field_summary(exc)
+            last_error = f"AI 返回字段格式不符合要求（字段：{invalid_fields}）"
+            retry_instruction = (
+                "\n【格式修正】上次返回未通过字段校验。"
+                f"请修正这些字段：{invalid_fields}。必须返回全部必填字段。"
+            )
+            logger.warning(
+                "搜索意图字段校验失败 (attempt %d/2): %s",
+                attempt,
+                invalid_fields,
+            )
+        except json.JSONDecodeError:
+            last_error = "AI 返回的搜索意图不是有效 JSON"
+            retry_instruction = (
+                "\n【格式修正】上次返回不是有效 JSON。请只返回一个 JSON 对象，"
+                "不要使用 Markdown 代码块。"
+            )
+            logger.warning("搜索意图 JSON 解析失败 (attempt %d/2)", attempt)
+        except ValueError as exc:
+            last_error = str(exc)
+            retry_instruction = (
+                "\n【格式修正】上次返回缺少搜索意图核心字段。"
+                "请严格按照 JSON Schema 返回全部字段。"
+            )
+            logger.warning("搜索意图响应无效 (attempt %d/2): %s", attempt, exc)
         except Exception as exc:
             if provider_name == "gemini":
                 last_error = _classify_gemini_error(exc, model_name)
@@ -692,7 +889,7 @@ def analyze_search_intent(
         if attempt < 2:
             time.sleep(1.0)
 
-    raise ArticleAnalysisError(f"搜索意图 AI 理解失败：{last_error}")
+    raise ArticleAnalysisError(f"搜索意图 AI 返回异常：{last_error}")
 
 
 SOURCE_CREDIBILITY_SYSTEM_PROMPT = """你是一名新闻搜索初筛审查员。
@@ -1051,7 +1248,7 @@ def analyze_article_with_chat_completions(
                 article_title[:50],
             )
             request_options: dict[str, Any] = {}
-            if get_ai_provider() == "deepseek":
+            if _uses_official_deepseek_api(get_ai_provider()):
                 thinking_mode = os.getenv(
                     "DEEPSEEK_THINKING", "disabled"
                 ).strip().lower()
