@@ -268,7 +268,7 @@ class AppSmokeTestCase(unittest.TestCase):
                 app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
                 self.assertEqual(list(app.exception), [])
                 button_labels = [button.label for button in app.button]
-                self.assertIn("立即搜索", button_labels)
+                self.assertIn("下一步：确认目标", button_labels)
                 self.assertIn("⚙️", button_labels)
                 self.assertNotIn("解锁管理操作", button_labels)
                 self.assertTrue(
@@ -276,6 +276,76 @@ class AppSmokeTestCase(unittest.TestCase):
                 )
                 self.assertTrue(
                     any("半导体产业研报" in markdown.value for markdown in app.markdown)
+                )
+
+                app.session_state["search_intent_review"] = {
+                    "original_query": "AI",
+                    "intent": {
+                        "intent_summary": "了解 AI 相关新闻",
+                        "target_topics": ["AI"],
+                        "chinese_queries": ["AI 新闻"],
+                        "english_queries": ["artificial intelligence news"],
+                        "relevance_criteria": ["新闻核心讨论 AI"],
+                        "scope_level": "broad",
+                        "needs_clarification": True,
+                        "clarification_question": "您想了解广义 AI 还是具体应用？",
+                        "interpretations": [
+                            {
+                                "label": "广义 AI",
+                                "description": "覆盖整体行业动态",
+                                "intent_summary": "了解广义 AI 行业新闻",
+                                "target_topics": ["AI 行业"],
+                                "chinese_queries": ["AI 行业 新闻"],
+                                "english_queries": ["AI industry news"],
+                                "relevance_criteria": ["新闻影响 AI 行业"],
+                            },
+                            {
+                                "label": "AI 应用",
+                                "description": "关注行业应用与商业化",
+                                "intent_summary": "了解 AI 应用与商业化",
+                                "target_topics": ["AI 应用"],
+                                "chinese_queries": ["AI 应用 商业化"],
+                                "english_queries": ["AI applications commercialization"],
+                                "relevance_criteria": ["新闻提供具体 AI 应用"],
+                            },
+                        ],
+                        "recommended_interpretation_index": 0,
+                    },
+                    "fallback_reason": "",
+                    "max_articles": 8,
+                    "min_score": 70,
+                    "english_keyword": "",
+                    "revision": 0,
+                }
+                app.run(timeout=20)
+                self.assertTrue(
+                    any(
+                        "搜索前，请确认我的理解" in markdown.value
+                        for markdown in app.markdown
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        button.label == "✓ 是的，确认并开始搜索"
+                        for button in app.button
+                    )
+                )
+                st_radio_labels = [radio.label for radio in app.radio]
+                self.assertIn("选择检索方向", st_radio_labels)
+                confirm_button = next(
+                    button
+                    for button in app.button
+                    if button.label == "✓ 是的，确认并开始搜索"
+                )
+                with patch(
+                    "agent.fetch_and_pre_score", return_value=[]
+                ) as fetch_news:
+                    confirm_button.click().run(timeout=20)
+                self.assertEqual(list(app.exception), [])
+                fetch_news.assert_called_once()
+                self.assertEqual(
+                    fetch_news.call_args.kwargs["industry_keyword"],
+                    "AI 行业 新闻",
                 )
 
                 app.session_state["fetched_articles"] = [
@@ -312,6 +382,15 @@ class AppSmokeTestCase(unittest.TestCase):
                     }
                 ]
                 app.session_state["fetched_keyword"] = "复星AI"
+                app.session_state["fetched_search_intent"] = {
+                    "intent_summary": "查找与复星AI直接相关的新闻",
+                    "target_topics": ["复星AI"],
+                    "chinese_queries": ["复星AI"],
+                    "english_queries": [],
+                    "relevance_criteria": ["新闻核心内容涉及复星AI"],
+                    "used_fallback": True,
+                    "fallback_reason": "测试降级原因",
+                }
                 app.session_state["fetched_results"] = {
                     0: {
                         "analysis_status": "成功",
@@ -350,6 +429,12 @@ class AppSmokeTestCase(unittest.TestCase):
                 app.run(timeout=20)
                 self.assertTrue(
                     any("已搜索到的文章（1篇）" in markdown.value for markdown in app.markdown)
+                )
+                self.assertTrue(
+                    any(
+                        "AI 搜索意图理解未成功" in warning.value
+                        for warning in app.warning
+                    )
                 )
                 self.assertTrue(
                     any("AI 评估：主流来源" in caption.value for caption in app.caption)

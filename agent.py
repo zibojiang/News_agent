@@ -15,7 +15,7 @@ import re
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from dotenv import load_dotenv
 from google import genai
@@ -87,6 +87,18 @@ SEARCH_RELEVANCE_DIMENSION_MAXIMA = {
 }
 
 
+class SearchInterpretationSchema(BaseModel):
+    """宽泛或歧义查询的一个可确认解释。"""
+
+    label: str = Field(description="供用户选择的简短标题")
+    description: str = Field(description="说明该解释的范围和关注点")
+    intent_summary: str = Field(description="选中后可直接使用的最终搜索目标")
+    target_topics: list[str] = Field(description="该解释的核心主题")
+    chinese_queries: list[str] = Field(description="该解释的中文新闻检索词")
+    english_queries: list[str] = Field(description="该解释的英文新闻检索词")
+    relevance_criteria: list[str] = Field(description="该解释的相关性判断标准")
+
+
 class SearchIntentSchema(BaseModel):
     """AI 对用户搜索意图和检索词的结构化理解。"""
 
@@ -95,6 +107,28 @@ class SearchIntentSchema(BaseModel):
     chinese_queries: list[str] = Field(description="1-3 个中文新闻检索词")
     english_queries: list[str] = Field(description="1-2 个英文新闻检索词")
     relevance_criteria: list[str] = Field(description="2-5 条判断新闻是否相关的标准")
+    scope_level: Literal["broad", "focused", "specific"] = Field(
+        default="specific",
+        description="搜索范围：broad 宽泛、focused 适中、specific 具体",
+    )
+    needs_clarification: bool = Field(
+        default=False,
+        description="是否因范围过大或存在歧义而需要用户确认",
+    )
+    clarification_question: str = Field(
+        default="",
+        description="向用户提出的单个简洁澄清问题",
+    )
+    interpretations: list[SearchInterpretationSchema] = Field(
+        default_factory=list,
+        description="宽泛或歧义查询的 2-4 个可选解释",
+    )
+    recommended_interpretation_index: int = Field(
+        default=0,
+        ge=0,
+        le=3,
+        description="推荐解释在 interpretations 中的下标",
+    )
 
 
 class SourceCredibilitySchema(BaseModel):
@@ -440,10 +474,21 @@ def _prepare_analysis_prompts(
 
 
 SEARCH_INTENT_SYSTEM_PROMPT = """你是一名新闻检索策略师。
-请理解用户问题背后真正想了解的新闻主题，并产生简洁、可用于新闻搜索引擎的
-中英文检索词。保留用户的核心主题，可补充“新趋势、技术路线、市场、政策、产业化”等
+先判断用户的输入是否范围过大或存在多种合理解释，再生成检索策略。
+
+1. scope_level：
+   - broad：仅有“AI”“芯片”等大类，可能产生大量无关新闻。
+   - focused：有主题和方向，但仍可能存在语义歧义。
+   - specific：对象、范围或想了解的问题已经清晰。
+2. 若范围过大或存在歧义，needs_clarification 必须为 true，只提出一个简洁问题，
+   并返回 2-4 个互斥、可操作的 interpretations。每个解释都必须自带最终搜索目标、
+   中英文检索词和相关性判断标准，便于用户选中后直接搜索。
+3. 若意图清晰，needs_clarification 为 false、interpretations 为空，但仍返回一句可供用户确认的 intent_summary。
+
+保留用户的核心主题，可补充“新趋势、技术路线、市场、政策、产业化”等
 与问题直接相关的角度，但不得凭空限定某家企业、某项技术或某个结论。
 中文检索词返回 1-3 个，英文检索词返回 1-2 个；每个检索词都要尽量短。
+英文检索词必须是对搜索意图的英文表达，不得把中文原词原样填入 english_queries。
 相关性标准必须能用来判断一篇新闻是否回答了用户的问题。"""
 
 
@@ -452,17 +497,120 @@ def fallback_search_intent(
     english_query: str | None = None,
 ) -> SearchIntentSchema:
     """AI 意图理解失败时保留原始查询，不阻断新闻搜索。"""
-    cleaned_query = query.strip()
+    topic_parts = [
+        part.strip()
+        for part in re.split(r"\s*[+＋]\s*", query.strip())
+        if part.strip()
+    ]
+    cleaned_query = " ".join(topic_parts) or query.strip()
+    english = (english_query or "").strip()
+    topic_description = "、".join(topic_parts) if topic_parts else cleaned_query
+    normalized_query = re.sub(r"\s+", "", cleaned_query).casefold()
+    interpretations: list[SearchInterpretationSchema] = []
+    if normalized_query in {"ai", "人工智能"}:
+        interpretations = [
+            SearchInterpretationSchema(
+                label="广义 AI 行业",
+                description="覆盖模型、芯片、应用、投融资与政策等整体动态",
+                intent_summary="了解全球人工智能行业的重要新闻、技术趋势和市场变化",
+                target_topics=["人工智能", "技术趋势", "市场动态"],
+                chinese_queries=["AI 行业 最新动态", "人工智能 技术 市场"],
+                english_queries=["artificial intelligence industry news"],
+                relevance_criteria=["新闻核心事件直接影响 AI 技术、市场或政策"],
+            ),
+            SearchInterpretationSchema(
+                label="AI 应用与商业化",
+                description="关注 AI 在具体行业的产品应用、客户案例和投入产出",
+                intent_summary="查找 AI 在各行业的产品应用、商业化案例和可量化效果",
+                target_topics=["AI 应用", "商业化", "行业案例"],
+                chinese_queries=["AI 行业应用 商业化 案例"],
+                english_queries=["AI applications commercialization case studies"],
+                relevance_criteria=["新闻提供具体 AI 应用场景、客户或量化效果"],
+            ),
+            SearchInterpretationSchema(
+                label="大模型与基础设施",
+                description="关注基础模型、AI 芯片、算力、数据中心和开发工具",
+                intent_summary="查找大模型、AI 芯片、算力基础设施和开发工具的最新动态",
+                target_topics=["大模型", "AI 芯片", "算力基础设施"],
+                chinese_queries=["大模型 AI 芯片 算力 最新动态"],
+                english_queries=["foundation models AI chips compute infrastructure"],
+                relevance_criteria=["新闻核心讨论模型、算力或 AI 基础设施"],
+            ),
+        ]
+        scope_level: Literal["broad", "focused", "specific"] = "broad"
+        clarification_question = "“AI”范围较广，您想检索广义 AI 新闻，还是某个具体方向？"
+    elif len(topic_parts) >= 2:
+        scope_level = "focused"
+        clarification_question = (
+            f"“{topic_description}”可能存在多种关系，请确认您具体想了解的对象和方向。"
+        )
+    else:
+        scope_level = "broad" if len(cleaned_query) <= 6 else "specific"
+        clarification_question = (
+            f"请确认：您是否希望按“{cleaned_query}”这个目标搜索新闻？"
+        )
     return SearchIntentSchema(
         intent_summary=f"查找与“{cleaned_query}”直接相关的最新新闻与产业信息",
-        target_topics=[cleaned_query],
+        target_topics=topic_parts or [cleaned_query],
         chinese_queries=[cleaned_query],
-        english_queries=[(english_query or cleaned_query).strip()],
+        english_queries=[english] if english else [],
         relevance_criteria=[
-            f"新闻核心事件与“{cleaned_query}”直接相关",
-            "正文提供能回答搜索问题的事实、趋势或数据",
+            f"新闻核心内容实质涉及“{topic_description}”",
+            f"正文说明“{topic_description}”之间的具体关系，并提供可核对的事实、趋势或数据",
         ],
+        scope_level=scope_level,
+        needs_clarification=True,
+        clarification_question=clarification_question,
+        interpretations=interpretations,
+        recommended_interpretation_index=0,
     )
+
+
+def _supports_openai_responses_api(provider_name: str) -> bool:
+    """官方 OpenAI 使用 Responses；自定义兼容地址默认使用 Chat Completions。"""
+    if provider_name != "openai":
+        return False
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip().lower()
+    return not base_url or "api.openai.com" in base_url
+
+
+def _request_chat_completion_json(
+    client: OpenAI,
+    model_name: str,
+    system_prompt: str,
+    user_prompt: str,
+    provider_name: str,
+) -> dict[str, Any]:
+    """使用 OpenAI 兼容的 Chat Completions 获取 JSON 对象。"""
+    request_options: dict[str, Any] = {}
+    if provider_name == "deepseek":
+        thinking_mode = os.getenv(
+            "DEEPSEEK_THINKING", "disabled"
+        ).strip().lower()
+        if thinking_mode not in {"enabled", "disabled"}:
+            thinking_mode = "disabled"
+        request_options["extra_body"] = {
+            "thinking": {"type": thinking_mode}
+        }
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "system",
+                "content": system_prompt + "\nRespond with a valid JSON object.",
+            },
+            {"role": "user", "content": user_prompt},
+        ],
+        response_format={"type": "json_object"},
+        **request_options,
+    )
+    content = response.choices[0].message.content
+    if not content:
+        raise ValueError("Chat Completions 返回空响应")
+    parsed = json.loads(content)
+    if not isinstance(parsed, dict):
+        raise ValueError("Chat Completions 未返回 JSON 对象")
+    return parsed
 
 
 def analyze_search_intent(
@@ -512,7 +660,7 @@ def analyze_search_intent(
                 return SearchIntentSchema.model_validate_json(response.text)
 
             client = _get_openai_client()
-            if provider_name == "openai":
+            if _supports_openai_responses_api(provider_name):
                 response = client.responses.parse(
                     model=model_name,
                     input=[
@@ -525,28 +673,15 @@ def analyze_search_intent(
                     raise ValueError("OpenAI 返回空响应")
                 return response.output_parsed
 
-            thinking_mode = os.getenv(
-                "DEEPSEEK_THINKING", "disabled"
-            ).strip().lower()
-            if thinking_mode not in {"enabled", "disabled"}:
-                thinking_mode = "disabled"
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": SEARCH_INTENT_SYSTEM_PROMPT
-                        + "\nRespond with a valid JSON object.",
-                    },
-                    {"role": "user", "content": user_prompt},
-                ],
-                response_format={"type": "json_object"},
-                extra_body={"thinking": {"type": thinking_mode}},
+            return SearchIntentSchema.model_validate(
+                _request_chat_completion_json(
+                    client,
+                    model_name,
+                    SEARCH_INTENT_SYSTEM_PROMPT,
+                    user_prompt,
+                    provider_name,
+                )
             )
-            content = response.choices[0].message.content
-            if not content:
-                raise ValueError("DeepSeek 返回空响应")
-            return SearchIntentSchema.model_validate(json.loads(content))
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             last_error = f"搜索意图结构化输出无效（{type(exc).__name__}）"
         except Exception as exc:
@@ -664,7 +799,7 @@ def analyze_source_credibility(
                 return SourceCredibilitySchema.model_validate_json(response.text)
 
             client = _get_openai_client()
-            if provider_name == "openai":
+            if _supports_openai_responses_api(provider_name):
                 response = client.responses.parse(
                     model=model_name,
                     input=[
@@ -677,28 +812,15 @@ def analyze_source_credibility(
                     raise ValueError("OpenAI 返回空响应")
                 return response.output_parsed
 
-            thinking_mode = os.getenv(
-                "DEEPSEEK_THINKING", "disabled"
-            ).strip().lower()
-            if thinking_mode not in {"enabled", "disabled"}:
-                thinking_mode = "disabled"
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": SOURCE_CREDIBILITY_SYSTEM_PROMPT
-                        + "\nRespond with a valid JSON object.",
-                    },
-                    {"role": "user", "content": user_prompt},
-                ],
-                response_format={"type": "json_object"},
-                extra_body={"thinking": {"type": thinking_mode}},
+            return SourceCredibilitySchema.model_validate(
+                _request_chat_completion_json(
+                    client,
+                    model_name,
+                    SOURCE_CREDIBILITY_SYSTEM_PROMPT,
+                    user_prompt,
+                    provider_name,
+                )
             )
-            content = response.choices[0].message.content
-            if not content:
-                raise ValueError("DeepSeek 返回空响应")
-            return SourceCredibilitySchema.model_validate(json.loads(content))
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             last_error = f"相关性与来源初筛输出无效（{type(exc).__name__}）"
         except Exception as exc:
@@ -1127,8 +1249,13 @@ def analyze_article(
 ) -> NewsCaseSchema:
     """按 AI_PROVIDER 将单篇分析路由到 OpenAI 或 Gemini。"""
     provider_name = (provider or get_ai_provider()).strip().lower()
+    openai_analyzer = (
+        analyze_article_with_openai
+        if _supports_openai_responses_api(provider_name)
+        else analyze_article_with_chat_completions
+    )
     analyzers = {
-        "openai": analyze_article_with_openai,
+        "openai": openai_analyzer,
         "deepseek": analyze_article_with_chat_completions,
         "gemini": analyze_article_with_gemini,
     }

@@ -281,7 +281,7 @@ def fetch_latest_news(
     Args:
         query: 行业关键词，如「新能源」「人工智能」
         max_articles: 最多返回的文章条数
-        english_query: 可选英文检索词，留空时使用 query
+        english_query: 可选英文检索词
         additional_queries: AI 生成的额外中文检索词
         english_queries: AI 生成的英文检索词
 
@@ -309,10 +309,10 @@ def fetch_latest_news(
         [query, *(additional_queries or [])],
         limit=3,
     )
-    english_searches = unique_queries(
-        [english_query or "", *(english_queries or []), query],
-        limit=2,
-    )
+    english_candidates = [english_query or "", *(english_queries or [])]
+    if re.search(r"[A-Za-z]", query):
+        english_candidates.append(query)
+    english_searches = unique_queries(english_candidates, limit=2)
     encoded_query = quote_plus(query)
     logger.info("开始抓取真实新闻列表，关键词: %s", query)
 

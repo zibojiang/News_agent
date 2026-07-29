@@ -8,6 +8,28 @@ from scraper import fetch_and_extract_batch, fetch_latest_news
 
 
 class ScraperBatchTestCase(unittest.TestCase):
+    def test_does_not_send_untranslated_chinese_query_to_english_feed(self) -> None:
+        requested_sources = []
+
+        def fetch_source(_url: str, _limit: int, source_name: str):
+            requested_sources.append(source_name)
+            return [
+                {
+                    "title": "海外产品与中国供应链研发",
+                    "url": "https://example.cn/supply-chain",
+                    "source": "测试媒体",
+                }
+            ]
+
+        with patch("scraper._fetch_rss_news", side_effect=fetch_source):
+            results = fetch_latest_news(
+                "海外产品 中国供应链研发",
+                max_articles=2,
+            )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(requested_sources, ["Google News 中文"])
+
     def test_merges_english_news_and_prioritizes_authoritative_sources(self) -> None:
         requested_urls = []
 

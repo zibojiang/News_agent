@@ -18,6 +18,7 @@ from agent import (
     analyze_article_with_chat_completions,
     analyze_search_intent,
     calculate_recommendation_score,
+    fallback_search_intent,
     get_ai_analysis_workers,
     get_ai_provider,
     get_gemini_model,
@@ -97,6 +98,58 @@ class AgentEvidenceTestCase(unittest.TestCase):
         self.assertEqual(result.english_queries, intent.english_queries)
         request = get_client.return_value.chat.completions.create.call_args.kwargs
         self.assertEqual(request["response_format"], {"type": "json_object"})
+
+    def test_search_intent_fallback_does_not_fake_english_translation(self) -> None:
+        result = fallback_search_intent("海外产品+中国供应链研发")
+
+        self.assertEqual(result.target_topics, ["海外产品", "中国供应链研发"])
+        self.assertEqual(result.chinese_queries, ["海外产品 中国供应链研发"])
+        self.assertEqual(result.english_queries, [])
+        self.assertTrue(result.needs_clarification)
+        self.assertEqual(result.scope_level, "focused")
+        self.assertIn("海外产品、中国供应链研发", result.relevance_criteria[0])
+
+    def test_broad_ai_fallback_offers_concrete_interpretations(self) -> None:
+        result = fallback_search_intent("AI")
+
+        self.assertEqual(result.scope_level, "broad")
+        self.assertTrue(result.needs_clarification)
+        self.assertGreaterEqual(len(result.interpretations), 3)
+        self.assertEqual(result.interpretations[1].label, "AI 应用与商业化")
+        self.assertTrue(result.interpretations[1].english_queries)
+
+    def test_custom_openai_endpoint_uses_chat_completions_for_intent(self) -> None:
+        intent = SearchIntentSchema(
+            intent_summary="了解海外产品与中国供应链研发的协同",
+            target_topics=["overseas products", "China supply chain R&D"],
+            chinese_queries=["海外产品 中国供应链 研发"],
+            english_queries=["overseas products China supply chain R&D"],
+            relevance_criteria=["新闻同时讨论海外产品和中国研发供应链"],
+        )
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=intent.model_dump_json())
+                )
+            ]
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AI_PROVIDER": "openai",
+                    "OPENAI_BASE_URL": "https://example-compatible-api.test/v1",
+                },
+            ),
+            patch("agent._get_openai_client") as get_client,
+        ):
+            get_client.return_value.chat.completions.create.return_value = response
+            result = analyze_search_intent("海外产品+中国供应链研发")
+
+        self.assertEqual(result.english_queries, intent.english_queries)
+        get_client.return_value.responses.parse.assert_not_called()
+        request = get_client.return_value.chat.completions.create.call_args.kwargs
+        self.assertNotIn("extra_body", request)
 
     def test_deepseek_disables_thinking_for_structured_extraction(self) -> None:
         analysis = NewsCaseSchema(
@@ -238,7 +291,10 @@ class AgentEvidenceTestCase(unittest.TestCase):
             source_credibility_reason="来源信息有限",
             body_quality=_body_quality(),
         )
-        with patch("agent.analyze_article_with_openai", return_value=expected) as call:
+        with (
+            patch.dict(os.environ, {"OPENAI_BASE_URL": ""}),
+            patch("agent.analyze_article_with_openai", return_value=expected) as call,
+        ):
             result = analyze_article(
                 "测试新闻",
                 "https://example.com/news/1",

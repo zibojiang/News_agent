@@ -721,6 +721,8 @@ def _clear_search_session() -> None:
         "fetched_keyword",
         "fetched_search_intent",
         "last_run_summary",
+        "search_intent_review",
+        "confirmed_search_request",
     ):
         st.session_state.pop(key, None)
 
@@ -821,6 +823,14 @@ def _render_article_cards(
     st.markdown(f"### 📰 已搜索到的文章（{len(articles)}篇）")
     intent = st.session_state.get("fetched_search_intent", {})
     if isinstance(intent, dict) and intent.get("intent_summary"):
+        if intent.get("used_fallback"):
+            st.warning(
+                "AI 搜索意图理解未成功，本次已降级为原始中文关键词搜索。"
+                "英文检索词只会在 AI 成功生成或你手动填写时使用。"
+            )
+            fallback_reason = str(intent.get("fallback_reason", "")).strip()
+            if fallback_reason:
+                st.caption(f"降级原因：{fallback_reason}")
         st.info(f"🧠 AI 理解的搜索目标：{intent['intent_summary']}")
         with st.expander("查看本次中英文检索策略"):
             target_topics = intent.get("target_topics", []) or []
@@ -1293,6 +1303,158 @@ def _render_task_center(cloud_demo: bool) -> None:
     st.dataframe(display_runs, width="stretch", hide_index=True)
 
 
+def _confirmed_intent_from_review(
+    intent: dict[str, Any],
+    selected_index: int = 0,
+) -> dict[str, Any]:
+    """将用户选中的解释转换为可直接搜索的最终意图。"""
+    interpretations = intent.get("interpretations", [])
+    if isinstance(interpretations, list) and interpretations:
+        index = max(0, min(int(selected_index), len(interpretations) - 1))
+        selected = interpretations[index]
+        if isinstance(selected, dict):
+            confirmed = {
+                "intent_summary": str(selected.get("intent_summary", "")),
+                "target_topics": list(selected.get("target_topics", []) or []),
+                "chinese_queries": list(
+                    selected.get("chinese_queries", []) or []
+                ),
+                "english_queries": list(
+                    selected.get("english_queries", []) or []
+                ),
+                "relevance_criteria": list(
+                    selected.get("relevance_criteria", []) or []
+                ),
+            }
+        else:
+            confirmed = dict(intent)
+    else:
+        confirmed = dict(intent)
+    confirmed.update(
+        {
+            "scope_level": "specific",
+            "needs_clarification": False,
+            "clarification_question": "",
+            "interpretations": [],
+            "recommended_interpretation_index": 0,
+            "confirmed_by_user": True,
+        }
+    )
+    return confirmed
+
+
+def _render_search_intent_review(review: dict[str, Any]) -> None:
+    """渲染搜索意图确认卡，确认前不访问新闻源。"""
+    intent = review.get("intent", {})
+    if not isinstance(intent, dict):
+        return
+    revision = int(review.get("revision", 0) or 0)
+    scope_labels = {
+        "broad": "范围较广",
+        "focused": "方向适中，可能有歧义",
+        "specific": "目标较明确",
+    }
+
+    st.markdown("### 🧠 搜索前，请确认我的理解")
+    with st.container(border=True):
+        if review.get("fallback_reason"):
+            st.warning(
+                "AI 意图理解本次未成功，已先按关键词结构生成可确认的备用方案。"
+            )
+            st.caption(f"降级原因：{review['fallback_reason']}")
+        scope = str(intent.get("scope_level", "specific"))
+        st.caption(f"搜索范围：{scope_labels.get(scope, '待确认')}")
+        st.markdown(
+            f"**我理解您想查找：**\n\n{intent.get('intent_summary', '')}"
+        )
+
+        interpretations = intent.get("interpretations", [])
+        selected_index = 0
+        if isinstance(interpretations, list) and interpretations:
+            question = str(
+                intent.get("clarification_question")
+                or "请选择最接近您真实需求的解释。"
+            )
+            st.markdown(f"**{question}**")
+            option_labels = [
+                f"{item.get('label', '选项')} — {item.get('description', '')}"
+                for item in interpretations
+                if isinstance(item, dict)
+            ]
+            recommended = int(
+                intent.get("recommended_interpretation_index", 0) or 0
+            )
+            recommended = max(0, min(recommended, len(option_labels) - 1))
+            selected_label = st.radio(
+                "选择检索方向",
+                option_labels,
+                index=recommended,
+                key=f"intent_choice_{revision}",
+            )
+            selected_index = option_labels.index(selected_label)
+        elif intent.get("clarification_question"):
+            st.markdown(f"**{intent['clarification_question']}**")
+
+        custom_intent = st.text_area(
+            "如果不是这个意思，请告诉我您真正想查的内容",
+            placeholder=(
+                "例如：我想搜索中国企业在海外销售的产品，"
+                "以及国内供应链如何支持这些产品研发。"
+            ),
+            key=f"intent_custom_{revision}",
+        )
+        confirm_col, revise_col = st.columns(2)
+        confirm_clicked = confirm_col.button(
+            "✓ 是的，确认并开始搜索",
+            type="primary",
+            width="stretch",
+            key=f"confirm_intent_{revision}",
+        )
+        revise_clicked = revise_col.button(
+            "按我的说明重新理解",
+            width="stretch",
+            disabled=not custom_intent.strip(),
+            key=f"revise_intent_{revision}",
+        )
+
+    if confirm_clicked:
+        confirmed = _confirmed_intent_from_review(intent, selected_index)
+        confirmed["used_fallback"] = bool(review.get("fallback_reason"))
+        confirmed["fallback_reason"] = str(review.get("fallback_reason", ""))
+        st.session_state.confirmed_search_request = {
+            "original_query": review.get("original_query", ""),
+            "intent": confirmed,
+            "max_articles": int(review.get("max_articles", 8)),
+            "min_score": int(review.get("min_score", 70)),
+            "english_keyword": str(review.get("english_keyword", "")),
+        }
+        st.session_state.pop("search_intent_review", None)
+        st.rerun()
+
+    if revise_clicked:
+        revised_query = custom_intent.strip()
+        try:
+            with st.spinner("AI 正在按您的说明重新理解…"):
+                revised_model = analyze_search_intent(revised_query)
+            fallback_reason = ""
+        except Exception as exc:
+            logger.warning("AI 重新理解搜索意图失败: %s", exc)
+            revised_model = fallback_search_intent(
+                revised_query,
+                english_query=str(review.get("english_keyword", "")) or None,
+            )
+            fallback_reason = str(exc)
+        st.session_state.search_intent_review = {
+            **review,
+            "original_query": revised_query,
+            "intent": revised_model.model_dump(),
+            "fallback_reason": fallback_reason,
+            "revision": revision + 1,
+        }
+        st.session_state.last_search_keyword = revised_query
+        st.rerun()
+
+
 def _render_search_page(cloud_demo: bool) -> None:
     _restore_latest_search()
     _, action_col = st.columns([12, 1])
@@ -1319,7 +1481,7 @@ def _render_search_page(cloud_demo: bool) -> None:
         st.markdown(
             """
             <div class="search-form-title">🔍 搜索新闻</div>
-            <div class="search-form-note">输入企业、品牌、事件、地区或行业指标，查找相关新闻并自动分析。</div>
+            <div class="search-form-note">输入企业、品牌、事件、地区或行业指标；AI 先与你确认检索目标，再开始搜索。</div>
             """,
             unsafe_allow_html=True,
         )
@@ -1333,7 +1495,7 @@ def _render_search_page(cloud_demo: bool) -> None:
             )
         with submit_col:
             run_button = st.form_submit_button(
-                "立即搜索", type="primary", width="stretch"
+                "下一步：确认目标", type="primary", width="stretch"
             )
         with st.expander("搜索设置"):
             option_cols = st.columns(2)
@@ -1347,7 +1509,7 @@ def _render_search_page(cloud_demo: bool) -> None:
             )
             english_keyword = st.text_input(
                 "英文关键词（可选）",
-                placeholder="例如 Fosun AI；留空时自动使用上方关键词",
+                placeholder="例如 overseas products China supply chain R&D",
                 help="用于搜索 Reuters、BBC、Bloomberg 等英文新闻源。",
             )
         st.markdown(
@@ -1373,9 +1535,7 @@ def _render_search_page(cloud_demo: bool) -> None:
             st.session_state.pop("fetched_articles", None)
             st.session_state.pop("fetched_search_intent", None)
             st.session_state.pop("pending_analysis", None)
-            live_articles: list[dict[str, Any]] = []
-            live_result_area = st.empty()
-            search_started = perf_counter()
+            st.session_state.pop("confirmed_search_request", None)
 
             try:
                 with st.spinner("🧠 AI 正在理解你想了解的新闻方向…"):
@@ -1388,53 +1548,96 @@ def _render_search_page(cloud_demo: bool) -> None:
                     english_query=english_keyword.strip() or None,
                 )
                 intent_fallback_reason = str(exc)
-            search_intent = search_intent_model.model_dump()
-            st.session_state.fetched_search_intent = search_intent
+            st.session_state.search_intent_review = {
+                "original_query": keyword,
+                "intent": search_intent_model.model_dump(),
+                "fallback_reason": intent_fallback_reason,
+                "max_articles": int(max_articles),
+                "min_score": int(min_score),
+                "english_keyword": english_keyword.strip(),
+                "revision": 0,
+            }
+            st.rerun()
 
-            def show_found_article(
-                article: dict[str, Any], found: int, total: int
-            ) -> None:
-                live_articles.append(article)
-                live_result_area.empty()
-                with live_result_area.container():
-                    _render_article_cards(live_articles, keyword)
+    intent_review = st.session_state.get("search_intent_review")
+    if isinstance(intent_review, dict):
+        _render_search_intent_review(intent_review)
 
-            with st.spinner(f"正在搜索「{keyword}」相关的新闻…"):
-                try:
-                    articles = fetch_and_pre_score(
-                        industry_keyword=keyword,
-                        max_articles=int(max_articles),
-                        article_callback=show_found_article,
-                        english_keyword=english_keyword.strip() or None,
-                        additional_queries=search_intent_model.chinese_queries,
-                        english_queries=search_intent_model.english_queries,
-                    )
-                except Exception as exc:
-                    logger.error("搜索失败: %s", exc, exc_info=True)
-                    st.error(f"搜索失败：{exc}")
-                    articles = []
-            search_seconds = perf_counter() - search_started
+    confirmed_request = st.session_state.pop("confirmed_search_request", None)
+    if isinstance(confirmed_request, dict):
+        search_intent = confirmed_request.get("intent", {})
+        if not isinstance(search_intent, dict):
+            search_intent = {}
+        confirmed_keyword = str(
+            search_intent.get("intent_summary")
+            or confirmed_request.get("original_query", "")
+        ).strip()
+        chinese_queries = list(search_intent.get("chinese_queries", []) or [])
+        primary_query = (
+            str(chinese_queries[0]).strip()
+            if chinese_queries
+            else confirmed_keyword
+        )
+        max_articles_value = int(confirmed_request.get("max_articles", 8))
+        min_score_value = int(confirmed_request.get("min_score", 70))
+        manual_english_keyword = str(
+            confirmed_request.get("english_keyword", "")
+        ).strip()
+        intent_fallback_reason = str(
+            search_intent.get("fallback_reason", "")
+        )
+        st.session_state.fetched_search_intent = search_intent
+        live_articles: list[dict[str, Any]] = []
+        live_result_area = st.empty()
+        search_started = perf_counter()
 
-            if articles:
-                st.session_state.fetched_articles = articles
-                st.session_state.fetched_keyword = keyword
-                _persist_latest_search(
-                    keyword,
-                    articles,
-                    search_intent=search_intent,
+        def show_found_article(
+            article: dict[str, Any], found: int, total: int
+        ) -> None:
+            live_articles.append(article)
+            live_result_area.empty()
+            with live_result_area.container():
+                _render_article_cards(live_articles, confirmed_keyword)
+
+        with st.spinner(f"正在搜索已确认的新闻目标…"):
+            try:
+                articles = fetch_and_pre_score(
+                    industry_keyword=primary_query,
+                    max_articles=max_articles_value,
+                    article_callback=show_found_article,
+                    english_keyword=manual_english_keyword or None,
+                    additional_queries=chinese_queries,
+                    english_queries=list(
+                        search_intent.get("english_queries", []) or []
+                    ),
                 )
-                st.session_state.pending_analysis = {
-                    "stage": "source",
-                    "keyword": keyword,
-                    "min_score": int(min_score),
-                    "max_articles": int(max_articles),
-                    "search_seconds": search_seconds,
-                    "search_intent": search_intent,
-                    "intent_fallback_reason": intent_fallback_reason,
-                }
-                st.rerun()
-            else:
-                st.warning("没有找到可分析的文章。请尝试更具体或更常见的关键词。")
+            except Exception as exc:
+                logger.error("搜索失败: %s", exc, exc_info=True)
+                st.error(f"搜索失败：{exc}")
+                articles = []
+        search_seconds = perf_counter() - search_started
+
+        if articles:
+            st.session_state.fetched_articles = articles
+            st.session_state.fetched_keyword = confirmed_keyword
+            _persist_latest_search(
+                confirmed_keyword,
+                articles,
+                search_intent=search_intent,
+            )
+            st.session_state.pending_analysis = {
+                "stage": "source",
+                "keyword": confirmed_keyword,
+                "original_query": confirmed_request.get("original_query", ""),
+                "min_score": min_score_value,
+                "max_articles": max_articles_value,
+                "search_seconds": search_seconds,
+                "search_intent": search_intent,
+                "intent_fallback_reason": intent_fallback_reason,
+            }
+            st.rerun()
+        else:
+            st.warning("没有找到可分析的文章。请尝试调整确认后的检索目标。")
 
     if not run_button and st.session_state.get("fetched_articles"):
         articles = st.session_state.fetched_articles
