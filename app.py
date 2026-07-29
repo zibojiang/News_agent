@@ -299,6 +299,147 @@ def _render_run_summary(summary: dict[str, Any]) -> None:
             },
         )
 
+def _render_score_breakdown(quality_details: dict) -> None:
+    """在 expander 中展示文章质量评分的各维度明细。"""
+    dim_scores = quality_details.get("dimension_scores", {})
+    dim_reasons = quality_details.get("dimension_reasons", {})
+    penalties = quality_details.get("penalties", [])
+    total = quality_details.get("total_score", 0)
+    adjusted = quality_details.get("adjusted_score", total)
+
+    dim_labels = {
+        "source_credibility": "来源权威度",
+        "keyword_relevance": "关键词匹配",
+        "content_density": "信息密度",
+        "data_richness": "数据含量",
+        "freshness": "时效性",
+        "headline_body_consistency": "标题一致性",
+        "originality": "原创性",
+        "completeness": "报道完整性",
+        "transparency": "透明度",
+    }
+    items: list[str] = []
+    for key, label in dim_labels.items():
+        score = dim_scores.get(key, 0)
+        reason = dim_reasons.get(key, "")
+        if score > 0 or reason:
+            items.append(f"{label}（{score}分）")
+    total_deduction = sum(p.get("deduction", 0) for p in penalties)
+
+    formula_parts = " + ".join(items) if items else "无维度数据"
+    if total_deduction > 0:
+        formula_parts += f" — 扣分（{total_deduction}分）"
+    st.markdown(f"**{adjusted}分** = {formula_parts}")
+
+    for key, label in dim_labels.items():
+        score = dim_scores.get(key, 0)
+        reason = dim_reasons.get(key, "")
+        if score > 0 or reason:
+            st.caption(f"{label}: {score}分 — {reason}" if reason else f"{label}: {score}分")
+    for penalty in penalties:
+        st.caption(f"⚠️ 扣分 {penalty.get('deduction', 0)}：{penalty.get('reason', '')}")
+
+
+def _render_article_cards(
+    articles: list[dict],
+    keyword: str,
+    results: dict[int, dict] | None = None,
+) -> None:
+    """渲染文章卡片列表。每张卡片含标题/来源/预评分/原文链接，分析完成后展示总评分和维度细分。
+
+    Args:
+        articles: fetch_and_pre_score 返回的文章列表
+        keyword: 搜索关键词（仅作标注，不影响渲染）
+        results: 已分析文章的结果字典，key 为文章序号(0-based)，value 为 run_pipeline 的 detail 字典
+    """
+    if not articles:
+        return
+
+    total_pre_score = sum(
+        a.get("quality_pre", type("obj", (), {"adjusted_score": 0})()).adjusted_score
+        for a in articles
+    )
+    analyzed_count = len(results) if results else 0
+
+    st.markdown(f"### 📰 搜索到的文章（{len(articles)}篇）")
+    if results:
+        analyzed_score = sum(
+            r.get("quality_score", 0) for r in (results or {}).values()
+        )
+        st.caption(
+            f"已完成 AI 分析 {analyzed_count}/{len(articles)} 篇"
+            f" | 预筛均分 {total_pre_score // len(articles)} → 综合均分 "
+            f"{analyzed_score // max(analyzed_count, 1)}"
+        )
+
+    for idx, article in enumerate(articles):
+        pre = article.get("quality_pre")
+        pre_score = pre.adjusted_score if hasattr(pre, "adjusted_score") else (
+            pre.total_score if hasattr(pre, "total_score") else 0
+        )
+        if hasattr(pre, "dimension_scores"):
+            pre_dims = dict(pre.dimension_scores)
+        else:
+            pre_dims = {}
+
+        result = (results or {}).get(idx)
+        title = article.get("title", "无标题")
+        source = article.get("source", "未知来源")
+        url = article.get("url", "#")
+        published = str(article.get("published_at", ""))[:16]
+
+        with st.container(border=True):
+            cols = st.columns([3, 1])
+            with cols[0]:
+                st.markdown(f"**{title[:80]}**")
+                st.caption(f"{source} · {published}")
+                if url and url != "#":
+                    st.markdown(f"[🔗 查看原文]({url})")
+            with cols[1]:
+                if result:
+                    relevance = result.get("score", 0) or 0
+                    quality = result.get("quality_score", 0) or 0
+                    label = result.get("quality_label", "")
+                    st.metric("相关性", f"{relevance}分")
+                    st.metric("综合质量", f"{quality}分", label)
+                    status = result.get("analysis_status", "?")
+                    store = result.get("storage_status", "?")
+                    st.caption(f"AI: {status} | 写入: {store}")
+                else:
+                    st.metric("预筛质量", f"{pre_score}分")
+                    st.caption("等待 AI 分析…")
+
+            if result and result.get("analysis_status") == "成功":
+                with st.expander(f"📊 评分详情（{result.get('quality_score', 0) or 0}分）"):
+                    quality_json = result.get("quality_details")
+                    if quality_json:
+                        _render_score_breakdown(quality_json)
+                    else:
+                        st.caption("暂无评分明细")
+                    reason = result.get("reason", "")
+                    if reason:
+                        st.caption(f"判定理由：{reason}")
+            elif not result:
+                with st.expander("📊 预筛评分详情"):
+                    if hasattr(pre, "dimension_scores") and pre.dimension_scores:
+                        _render_score_breakdown({
+                            "total_score": pre.total_score if hasattr(pre, "total_score") else pre_score,
+                            "adjusted_score": pre_score,
+                            "dimension_scores": pre_dims,
+                            "dimension_reasons": (
+                                dict(pre.dimension_reasons)
+                                if hasattr(pre, "dimension_reasons") else {}
+                            ),
+                            "penalties": [
+                                {"reason": p.reason, "deduction": p.deduction}
+                                for p in (pre.penalties if hasattr(pre, "penalties") else [])
+                            ],
+                        })
+                    else:
+                        st.caption("暂无评分明细")
+
+
+
 cloud_demo = is_cloud_demo()
 
 with st.sidebar:
@@ -373,20 +514,41 @@ if run_button:
         st.error("请输入新闻搜索词")
     else:
         st.session_state.pop("last_run_summary", None)
-        progress_bar = st.progress(0.0, text="正在准备新闻采集任务…")
 
-        def update_progress(message: str, value: float) -> None:
-            progress_bar.progress(value, text=message)
+        # ---- Step 1: 抓取并立即展示文章卡片 ----
+        with st.spinner(f"正在搜索新闻关键词「{search_keyword}」…"):
+            try:
+                articles = fetch_and_pre_score(
+                    industry_keyword=search_keyword.strip(),
+                    max_articles=int(max_articles),
+                )
+            except Exception as exc:
+                st.error(f"搜索失败：{exc}")
+                articles = []
 
-        with st.spinner(f"正在处理搜索关键词「{search_keyword}」，请稍候…"):
+        if articles:
+            st.session_state.fetched_articles = articles
+            st.session_state.fetched_keyword = search_keyword.strip()
+            _render_article_cards(articles, search_keyword.strip())
+
+            # ---- Step 2: AI 逐篇分析 ----
+            st.divider()
+            st.markdown("### 🤖 AI 分析中…")
+            progress_bar = st.progress(0.0, text="开始 AI 分析…")
+            results_container = st.empty()
+
+            def update_progress(message: str, value: float) -> None:
+                progress_bar.progress(value, text=message)
+
             try:
                 run_summary = run_pipeline(
                     industry_keyword=search_keyword.strip(),
                     min_score=min_score,
                     max_articles=int(max_articles),
-                    topic=None,  # 自动归类到研究主题
+                    topic=None,
                     trigger_type="manual",
                     progress_callback=update_progress,
+                    pre_fetched_articles=articles,
                 )
                 st.session_state.last_run_summary = run_summary
             except ValueError as exc:
@@ -394,6 +556,9 @@ if run_button:
             except Exception as exc:
                 logger.error("手动任务失败: %s", exc, exc_info=True)
                 st.error(f"运行异常：{exc}")
+        else:
+            st.error("未获取到任何有效文章，请尝试其他关键词。")
+
 
 last_run_summary = st.session_state.get("last_run_summary")
 if last_run_summary:
