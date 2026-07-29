@@ -27,6 +27,7 @@ from agent import (
     DEFAULT_AI_PROVIDER,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_OPENAI_MODEL,
+    fetch_and_pre_score,
     run_pipeline,
 )
 from database import (

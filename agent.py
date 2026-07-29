@@ -642,6 +642,40 @@ def _classify_topic_posthoc(
         return None
     return best_topic
 
+def fetch_and_pre_score(
+    industry_keyword: str,
+    max_articles: int = 8,
+) -> list[dict[str, Any]]:
+    """抓取新闻列表并执行预 AI 质量评分（纯算法），返回文章列表供前端展示。
+
+    与 run_pipeline 的抓取阶段逻辑一致，但不进入 AI 分析。
+    调用方拿到文章列表后可先展示卡片，再调用 run_pipeline 进行 AI 分析。
+
+    Args:
+        industry_keyword: 行业关键词
+        max_articles: 单次最多处理文章数
+
+    Returns:
+        已含 quality_pre 字段的文章列表
+    """
+    articles = fetch_and_extract_batch(
+        industry_keyword, max_articles=max_articles
+    )
+
+    for article in articles:
+        article["quality_pre"] = score_article_pre_ai(
+            title=article["title"],
+            url=article["url"],
+            content=article["content"],
+            source=str(article.get("source", "")),
+            published_at=str(article.get("published_at", "")),
+            keyword=industry_keyword,
+            content_hash=str(article.get("content_hash", "")),
+        )
+
+    return articles
+
+
 
 def run_pipeline(
     industry_keyword: str,
@@ -658,6 +692,10 @@ def run_pipeline(
         industry_keyword: 行业关键词
         min_score: 入库最低相关性分数
         max_articles: 单次最多处理文章数
+        topic: 预设的研究主题字典（可选）
+        trigger_type: 触发方式标识（manual / scheduled）
+        progress_callback: 进度回调 (message, progress_float)
+        pre_fetched_articles: 预先抓取的带 pre-AI 评分的文章列表，提供时跳过抓取阶段
 
     Returns:
         运行摘要字典，包含 AI、新闻入库、案例入库及错误统计
@@ -691,33 +729,36 @@ def run_pipeline(
     )
 
     try:
-        _notify_progress(progress_callback, "正在搜索新闻并提取正文…", 0.05)
-        try:
-            articles = fetch_and_extract_batch(
-                industry_keyword, max_articles=max_articles
-            )
-
-            # 预 AI 质量评分（纯算法，零成本）
-            for article in articles:
-                article["quality_pre"] = score_article_pre_ai(
-                    title=article["title"],
-                    url=article["url"],
-                    content=article["content"],
-                    source=str(article.get("source", "")),
-                    published_at=str(article.get("published_at", "")),
-                    keyword=industry_keyword,
-                    content_hash=str(article.get("content_hash", "")),
+        if pre_fetched_articles is None:
+            _notify_progress(progress_callback, "正在搜索新闻并提取正文…", 0.05)
+            try:
+                articles = fetch_and_extract_batch(
+                    industry_keyword, max_articles=max_articles
                 )
-        except Exception as exc:
-            error = f"抓取失败：{type(exc).__name__}: {exc}"
-            logger.error("抓取阶段异常: %s", type(exc).__name__)
-            summary["errors"].append(error)
-            return summary
 
-        if not articles:
-            summary["errors"].append("未获取到有效文章")
-            logger.warning("流水线结束：无可用文章")
-            return summary
+                # 预 AI 质量评分（纯算法，零成本）
+                for article in articles:
+                    article["quality_pre"] = score_article_pre_ai(
+                        title=article["title"],
+                        url=article["url"],
+                        content=article["content"],
+                        source=str(article.get("source", "")),
+                        published_at=str(article.get("published_at", "")),
+                        keyword=industry_keyword,
+                        content_hash=str(article.get("content_hash", "")),
+                    )
+            except Exception as exc:
+                error = f"抓取失败：{type(exc).__name__}: {exc}"
+                logger.error("抓取阶段异常: %s", type(exc).__name__)
+                summary["errors"].append(error)
+                return summary
+
+            if not articles:
+                summary["errors"].append("未获取到有效文章")
+                logger.warning("流水线结束：无可用文章")
+                return summary
+        else:
+            articles = pre_fetched_articles
 
         total_articles = len(articles)
         _notify_progress(
