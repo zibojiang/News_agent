@@ -431,10 +431,13 @@ def _render_score_breakdown(quality_details: dict) -> None:
     adjusted = quality_details.get("adjusted_score", total)
     quality_warnings = quality_details.get("quality_warnings", [])
 
-    dimensions = {
-        **BASE_QUALITY_DIMENSIONS,
-        **({} if is_pre_score else BODY_QUALITY_DIMENSIONS),
-    }
+    dimensions = dict(BASE_QUALITY_DIMENSIONS)
+    dimensions["source_credibility"] = (
+        "来源权威度（规则预估）" if is_pre_score else "来源权威度（AI 评分）",
+        25,
+    )
+    if not is_pre_score:
+        dimensions.update(BODY_QUALITY_DIMENSIONS)
     bounded_scores = {
         key: _bounded_dimension_score(dim_scores.get(key), maximum)
         for key, (_, maximum) in dimensions.items()
@@ -676,9 +679,9 @@ def _render_article_cards(
         source_score = int(pre_dims.get("source_credibility", 0) or 0)
         source_label = ""
         if source_score >= 22:
-            source_label = " · 🛡️ 权威来源"
+            source_label = " · 🛡️ 来源预估：权威"
         elif source_score >= 15:
-            source_label = " · 主流来源"
+            source_label = " · 来源预估：主流"
 
         with st.container(border=True):
             cols = st.columns([3, 1])

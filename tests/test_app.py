@@ -138,6 +138,12 @@ class AppSmokeTestCase(unittest.TestCase):
                         for metric in app.metric
                     )
                 )
+                self.assertTrue(
+                    any(
+                        "来源权威度（规则预估）" in caption.value
+                        for caption in app.caption
+                    )
+                )
 
                 app.session_state["fetched_results"] = {
                     0: {
@@ -184,6 +190,12 @@ class AppSmokeTestCase(unittest.TestCase):
                         "基础分 40/50 + AI 正文质量 45/50 = 综合质量 85/100"
                         in markdown.value
                         for markdown in app.markdown
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        "来源权威度（AI 评分）" in caption.value
+                        for caption in app.caption
                     )
                 )
 
