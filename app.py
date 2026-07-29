@@ -450,7 +450,7 @@ def _render_article_cards(
                     store = result.get("storage_status", "?")
                     st.caption(f"AI: {status} | 写入: {store}")
                 else:
-                    st.metric("预筛质量", f"{pre_score}分")
+                    st.metric("新闻预筛质量", f"{pre_score}分")
                     st.caption("等待 AI 分析…")
 
             if result and result.get("analysis_status") == "成功":
