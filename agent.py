@@ -37,10 +37,24 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# AI 提供方与模型名称（均可通过环境变量覆盖）
-DEFAULT_AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
-DEFAULT_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
-DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
+# AI 提供方与模型名称。函数在每次调用时读取环境，支持 Streamlit
+# 重新运行后立即使用本地 .env 的最新配置。
+def get_ai_provider() -> str:
+    return os.getenv("AI_PROVIDER", "openai").strip().lower()
+
+
+def get_openai_model() -> str:
+    return os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+
+
+def get_gemini_model() -> str:
+    return os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
+
+
+# 保留兼容旧调用的导入时快照；核心分析和页面展示使用上面的动态函数。
+DEFAULT_AI_PROVIDER = get_ai_provider()
+DEFAULT_OPENAI_MODEL = get_openai_model()
+DEFAULT_GEMINI_MODEL = get_gemini_model()
 DEFAULT_OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "").strip()
 
 # API 调用重试配置
@@ -282,7 +296,7 @@ def analyze_article_with_openai(
         raise ArticleAnalysisError("新闻正文为空")
 
     client = _get_openai_client()
-    model_name = model or DEFAULT_OPENAI_MODEL
+    model_name = model or get_openai_model()
     system_prompt, user_prompt = _prepare_analysis_prompts(
         article_title,
         article_url,
@@ -366,7 +380,7 @@ def analyze_article_with_chat_completions(
         raise ArticleAnalysisError("新闻正文为空")
 
     client = _get_openai_client()
-    model_name = model or DEFAULT_OPENAI_MODEL
+    model_name = model or get_openai_model()
     system_prompt, user_prompt = _prepare_analysis_prompts(
         article_title,
         article_url,
@@ -463,7 +477,7 @@ def analyze_article_with_gemini(
         raise ArticleAnalysisError("新闻正文为空")
 
     client = _get_gemini_client()
-    model_name = model or DEFAULT_GEMINI_MODEL
+    model_name = model or get_gemini_model()
     system_prompt, user_prompt = _prepare_analysis_prompts(
         article_title,
         article_url,
@@ -572,7 +586,7 @@ def analyze_article(
     model: str | None = None,
 ) -> NewsCaseSchema:
     """按 AI_PROVIDER 将单篇分析路由到 OpenAI 或 Gemini。"""
-    provider_name = (provider or DEFAULT_AI_PROVIDER).strip().lower()
+    provider_name = (provider or get_ai_provider()).strip().lower()
     analyzers = {
         "openai": analyze_article_with_openai,
         "deepseek": analyze_article_with_chat_completions,

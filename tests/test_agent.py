@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -8,11 +9,27 @@ from agent import (
     NewsCaseSchema,
     _keep_verifiable_evidence,
     analyze_article,
+    get_ai_provider,
+    get_gemini_model,
+    get_openai_model,
     run_pipeline,
 )
 
 
 class AgentEvidenceTestCase(unittest.TestCase):
+    def test_ai_settings_are_read_dynamically(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "AI_PROVIDER": "gemini",
+                "GEMINI_MODEL": "gemini-test-model",
+                "OPENAI_MODEL": "openai-test-model",
+            },
+        ):
+            self.assertEqual(get_ai_provider(), "gemini")
+            self.assertEqual(get_gemini_model(), "gemini-test-model")
+            self.assertEqual(get_openai_model(), "openai-test-model")
+
     def test_routes_analysis_to_openai(self) -> None:
         expected = NewsCaseSchema(
             title="测试新闻",

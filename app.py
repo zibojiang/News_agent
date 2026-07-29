@@ -17,12 +17,18 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+# 本地开发时，Streamlit 每次重新运行都刷新 .env；Cloud 环境继续以
+# Streamlit Secrets 注入的环境变量为准。
+load_dotenv(
+    override=os.getenv("DEPLOYMENT_MODE", "local").strip().lower() == "local"
+)
+
 from access_control import is_cloud_demo
 from agent import (
-    DEFAULT_AI_PROVIDER,
-    DEFAULT_GEMINI_MODEL,
-    DEFAULT_OPENAI_MODEL,
     fetch_and_pre_score,
+    get_ai_provider,
+    get_gemini_model,
+    get_openai_model,
     run_pipeline,
 )
 from database import (
@@ -36,8 +42,6 @@ from database import (
     update_case_review_status,
     update_topic,
 )
-
-load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -976,11 +980,12 @@ if st.session_state.active_view == "management":
 else:
     _render_search_page(cloud_demo)
 
+active_provider = get_ai_provider()
 active_model = (
-    DEFAULT_GEMINI_MODEL if DEFAULT_AI_PROVIDER == "gemini" else DEFAULT_OPENAI_MODEL
+    get_gemini_model() if active_provider == "gemini" else get_openai_model()
 )
 st.markdown(
-    f'<p class="footer-note">AI：{DEFAULT_AI_PROVIDER} / {active_model} · '
+    f'<p class="footer-note">AI：{active_provider} / {active_model} · '
     f'运行模式：{"cloud_demo" if cloud_demo else "local"}</p>',
     unsafe_allow_html=True,
 )
