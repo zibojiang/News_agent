@@ -27,9 +27,15 @@ class AppSmokeTestCase(unittest.TestCase):
                 app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
                 self.assertEqual(list(app.exception), [])
                 button_labels = [button.label for button in app.button]
-                self.assertIn("搜索并分析", button_labels)
+                self.assertIn("立即搜索", button_labels)
                 self.assertIn("⚙️", button_labels)
                 self.assertNotIn("解锁管理操作", button_labels)
+                self.assertTrue(
+                    any("搜索新闻" in markdown.value for markdown in app.markdown)
+                )
+                self.assertTrue(
+                    any("复星旅文最新动态" in markdown.value for markdown in app.markdown)
+                )
 
                 management_button = next(
                     button for button in app.button if button.label == "⚙️"

@@ -143,10 +143,41 @@ st.markdown(
         background: #fff;
     }
     [data-testid="stForm"] {
-        border: 1px solid #dfe5f2;
-        border-radius: 16px;
-        padding: 1rem 1rem .35rem;
-        background: rgba(255,255,255,.92);
+        border: 2px solid #5f7fe8;
+        border-radius: 18px;
+        padding: 1.25rem 1.25rem .7rem;
+        background: #fff;
+        box-shadow: 0 12px 30px rgba(36, 87, 214, .13);
+    }
+    [data-testid="stForm"] [data-testid="stTextInput"] input {
+        min-height: 3.35rem;
+        border: 2px solid #9db2ef;
+        border-radius: 11px;
+        background: #fbfcff;
+        font-size: 1.03rem;
+        padding-inline: 1rem;
+    }
+    [data-testid="stForm"] [data-testid="stTextInput"] input:focus {
+        border-color: var(--brand);
+        box-shadow: 0 0 0 3px rgba(36, 87, 214, .12);
+    }
+    [data-testid="stForm"] [data-testid="stFormSubmitButton"] button {
+        min-height: 3.35rem;
+        border-radius: 11px;
+        font-weight: 750;
+        font-size: 1rem;
+    }
+    .search-form-title {color: var(--ink); font-size: 1.28rem; font-weight: 800; margin-bottom: .15rem;}
+    .search-form-note {color: var(--muted); font-size: .9rem; margin-bottom: .85rem;}
+    .search-examples {display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; margin: .45rem 0 .2rem;}
+    .search-examples strong {color: #475467; font-size: .82rem; margin-right: .1rem;}
+    .search-examples span {
+        color: #3156b8;
+        font-size: .8rem;
+        padding: .28rem .58rem;
+        border-radius: 999px;
+        background: var(--brand-soft);
+        border: 1px solid #d7e2ff;
     }
     [data-testid="stSidebar"] {border-right: 1px solid var(--line);}
     div[data-testid="stExpander"] {border-color: var(--line); border-radius: 12px;}
@@ -765,17 +796,24 @@ def _render_search_page(cloud_demo: bool) -> None:
     )
 
     with st.form("news_search_form"):
+        st.markdown(
+            """
+            <div class="search-form-title">🔍 搜索新闻</div>
+            <div class="search-form-note">输入企业、品牌、事件、地区或行业指标，查找相关新闻并自动分析。</div>
+            """,
+            unsafe_allow_html=True,
+        )
         search_col, submit_col = st.columns([7, 2])
         with search_col:
             search_keyword = st.text_input(
                 "搜索关键词",
                 value=st.session_state.get("last_search_keyword", ""),
-                placeholder="例如：酒店集团业绩、文旅消费、景区客流增长",
+                placeholder="输入你想搜索的新闻关键词…",
                 label_visibility="collapsed",
             )
         with submit_col:
             run_button = st.form_submit_button(
-                "搜索并分析", type="primary", width="stretch"
+                "立即搜索", type="primary", width="stretch"
             )
         with st.expander("搜索设置"):
             option_cols = st.columns(2)
@@ -787,7 +825,17 @@ def _render_search_page(cloud_demo: bool) -> None:
                 "案例入库门槛", min_value=0, max_value=100, value=70, step=5,
                 help="低于门槛的结果仍会保留在新闻池。",
             )
-        st.caption("试试：复星旅文业绩 · 入境游增长 · 酒店会员体系 · 景区客流")
+        st.markdown(
+            """
+            <div class="search-examples">
+                <strong>搜索示例</strong>
+                <span>半导体产业研报</span>
+                <span>AI行业应用，商业化ROI</span>
+                <span>AI市场份额，竞争格局</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     if cloud_demo:
         st.caption("当前是云端展示模式；应用重启后，临时数据可能重置。")
