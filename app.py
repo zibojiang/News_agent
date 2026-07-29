@@ -473,7 +473,7 @@ def _render_score_breakdown(quality_details: dict) -> None:
     )
     if is_pre_score:
         pre_score = max(0, min(50, int(adjusted or 0)))
-        st.markdown(f"#### ⭐ 基础分 {pre_score}/50")
+        st.markdown(f"#### 基础分 {pre_score}/50")
         st.caption("基础评分已完成；AI 分析完成后会再生成 50 分正文质量分。")
     else:
         body_score = sum(
@@ -483,7 +483,7 @@ def _render_score_breakdown(quality_details: dict) -> None:
         heading = f"综合质量 {adjusted}/100"
         if quality_label:
             heading += f" · {quality_label}"
-        st.markdown(f"#### ⭐ {heading}")
+        st.markdown(f"####  {heading}")
         equation = f"基础分 {base_score}/50 + AI 正文质量 {body_score}/50"
         if total_deduction > 0:
             equation += f" - 扣分 {total_deduction}"
@@ -834,7 +834,7 @@ def _render_article_cards(
                 )
                 quality_label = result.get("quality_label", "")
                 expander_label = (
-                    f"⭐ 查看完整评分｜{quality_score}/100 · {quality_label}"
+                    f" 查看完整评分｜{quality_score}/100 · {quality_label}"
                 )
                 with st.expander(expander_label):
                     if isinstance(quality_json, dict):
@@ -845,7 +845,7 @@ def _render_article_cards(
                     if reason:
                         st.caption(f"判定理由：{reason}")
             elif has_current_pre_score:
-                with st.expander(f"⭐ 查看基础评分｜{pre_score}/50"):
+                with st.expander(f" 查看基础评分｜{pre_score}/50"):
                     if pre_dims:
                         _render_score_breakdown(pre_state)
                     else:
