@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # 评分规则版本 — 变更时触发重新评分
 # ============================================================
-NEWS_QUALITY_RULE_VERSION = "v3"
+NEWS_QUALITY_RULE_VERSION = "v4"
 
 # ============================================================
 # 来源权威度配置（独立存放，便于扩展）
@@ -97,6 +97,20 @@ SOURCE_DOMAIN_PROFILES: dict[str, tuple[int, str]] = {
     "imf.org": (25, "国际公共机构官网"),
     "un.org": (25, "国际公共机构官网"),
     "weforum.org": (23, "国际研究/公共机构官网"),
+    # 知名企业官方研究与一手资料（保留企业自述偏向的折价）
+    "ibm.com": (21, "知名企业官网/一手研究来源"),
+    "microsoft.com": (20, "知名企业官网/一手资料"),
+    "google.com": (20, "知名企业官网/一手资料"),
+    "amazon.com": (20, "知名企业官网/一手资料"),
+    "nvidia.com": (20, "知名企业官网/一手资料"),
+    "salesforce.com": (20, "知名企业官网/一手资料"),
+    "sap.com": (20, "知名企业官网/一手资料"),
+    "oracle.com": (20, "知名企业官网/一手资料"),
+    "adobe.com": (20, "知名企业官网/一手资料"),
+    "openai.com": (20, "知名企业官网/一手资料"),
+    "anthropic.com": (20, "知名企业官网/一手资料"),
+    "alibabagroup.com": (20, "知名企业官网/一手资料"),
+    "huawei.com": (20, "知名企业官网/一手资料"),
 }
 
 # 通用域名评分和扣分
@@ -130,6 +144,13 @@ def compute_source_credibility(source: str, url: str) -> tuple[int, str]:
     for known_domain, (candidate_score, category) in SOURCE_DOMAIN_PROFILES.items():
         if _domain_matches(domain, known_domain):
             candidates.append((candidate_score, f"{category}：{known_domain}"))
+
+    # 未收录机构的安全兜底：来源名需与官网主域严格对得上。
+    if _source_matches_domain(source_clean, domain):
+        if _looks_like_research_page(url):
+            candidates.append((17, "官网一手研究/报告页面（机构未收录）"))
+        else:
+            candidates.append((14, "来源名与官网主域一致（机构未收录）"))
 
     domain_parts = set(domain.split("."))
     if domain and domain_parts.intersection({"gov", "govt", "gouv"}):
@@ -566,6 +587,48 @@ def _source_name_matches(source: str, known_name: str) -> bool:
         pattern = rf"(?<![a-z0-9]){re.escape(known_name.casefold())}(?![a-z0-9])"
         return re.search(pattern, source.casefold()) is not None
     return known_name in source
+
+
+def _registrable_domain_label(domain: str) -> str:
+    """提取用于与来源名核对的主域品牌段。"""
+    parts = [part for part in domain.casefold().split(".") if part]
+    if len(parts) < 2:
+        return ""
+    multi_part_suffixes = {
+        "com.cn", "com.hk", "com.au", "com.sg", "com.br",
+        "co.uk", "co.jp", "co.kr", "co.in", "co.nz",
+    }
+    suffix = ".".join(parts[-2:])
+    if suffix in multi_part_suffixes and len(parts) >= 3:
+        return parts[-3]
+    return parts[-2]
+
+
+def _source_matches_domain(source: str, domain: str) -> bool:
+    """判断来源名与官网主域是否严格一致。"""
+    brand = _registrable_domain_label(domain)
+    if len(brand) < 3:
+        return False
+    source_tokens = set(re.findall(r"[a-z0-9]+", source.casefold()))
+    return brand in source_tokens
+
+
+def _looks_like_research_page(url: str) -> bool:
+    """根据 URL 路径识别报告、研究、洞察等一手资料页面。"""
+    try:
+        path = urlparse(url).path.casefold()
+    except ValueError:
+        return False
+    path_tokens = set(re.findall(r"[a-z0-9]+", path))
+    return bool(
+        path_tokens.intersection(
+            {
+                "research", "report", "reports", "insight", "insights",
+                "study", "studies", "whitepaper", "whitepapers",
+                "institute", "thought", "leadership",
+            }
+        )
+    )
 
 
 def _parse_datetime(date_str: str) -> datetime | None:

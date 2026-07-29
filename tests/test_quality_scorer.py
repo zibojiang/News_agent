@@ -56,6 +56,30 @@ class TestSourceCredibility(unittest.TestCase):
         self.assertEqual(score, 10)
         self.assertIn("中性基础分", reason)
 
+    def test_ibm_official_research_is_a_known_primary_source(self):
+        score, reason = compute_source_credibility(
+            "IBM",
+            "https://www.ibm.com/thought-leadership/institute-business-value/report/ceo-study",
+        )
+        self.assertEqual(score, 21)
+        self.assertIn("知名企业官网/一手研究来源", reason)
+
+    def test_unlisted_official_research_page_gets_cautious_credit(self):
+        score, reason = compute_source_credibility(
+            "Example Labs",
+            "https://insights.example.com/research/industry-report",
+        )
+        self.assertEqual(score, 17)
+        self.assertIn("机构未收录", reason)
+
+    def test_ibm_lookalike_domain_is_not_treated_as_ibm_official(self):
+        score, reason = compute_source_credibility(
+            "IBM",
+            "https://fake-ibm.com/reports/ceo-study",
+        )
+        self.assertEqual(score, 10)
+        self.assertIn("中性基础分", reason)
+
     def test_unknown_source(self):
         score, reason = compute_source_credibility("未知小站", "https://example.com")
         self.assertGreaterEqual(score, 0)
