@@ -75,8 +75,18 @@ RETRY_BASE_DELAY = 2.0  # 秒，指数退避基数
 DEFAULT_MIN_SCORE = 70
 
 
+class SearchIntentSchema(BaseModel):
+    """AI 对用户搜索意图和检索词的结构化理解。"""
+
+    intent_summary: str = Field(description="一句话概括用户真正想了解的内容")
+    target_topics: list[str] = Field(description="2-5 个必须关注的主题或方向")
+    chinese_queries: list[str] = Field(description="1-3 个中文新闻检索词")
+    english_queries: list[str] = Field(description="1-2 个英文新闻检索词")
+    relevance_criteria: list[str] = Field(description="2-5 条判断新闻是否相关的标准")
+
+
 class SourceCredibilitySchema(BaseModel):
-    """AI 对新闻原始信息来源的独立评分。"""
+    """AI 对单篇新闻的搜索相关性与来源权威度评分。"""
 
     score: int = Field(
         ge=0,
@@ -84,6 +94,12 @@ class SourceCredibilitySchema(BaseModel):
         description="新闻原始信息来源的权威度评分，0-25 分",
     )
     reason: str = Field(description="评分依据，说明发布者、域名和一手资料属性")
+    relevance_score: int = Field(
+        ge=0,
+        le=100,
+        description="新闻与用户搜索意图的相关性，0-100 分",
+    )
+    relevance_reason: str = Field(description="简短说明新闻命中或偏离了哪些搜索意图")
 
 
 class BodyQualitySchema(BaseModel):

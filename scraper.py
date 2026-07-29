@@ -265,6 +265,8 @@ def fetch_latest_news(
     query: str,
     max_articles: int = MAX_ARTICLES_PER_RUN,
     english_query: str | None = None,
+    additional_queries: list[str] | None = None,
+    english_queries: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     根据行业关键词抓取最新真实新闻列表。
@@ -280,6 +282,8 @@ def fetch_latest_news(
         query: 行业关键词，如「新能源」「人工智能」
         max_articles: 最多返回的文章条数
         english_query: 可选英文检索词，留空时使用 query
+        additional_queries: AI 生成的额外中文检索词
+        english_queries: AI 生成的英文检索词
 
     Returns:
         新闻列表，每项包含 title / url / published_at
@@ -287,24 +291,52 @@ def fetch_latest_news(
     Raises:
         RuntimeError: 所有真实新闻源均无法获取数据时抛出
     """
+    def unique_queries(values: list[str], limit: int) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            cleaned = str(value).strip()
+            key = cleaned.casefold()
+            if not cleaned or key in seen:
+                continue
+            seen.add(key)
+            result.append(cleaned)
+            if len(result) >= limit:
+                break
+        return result
+
+    chinese_searches = unique_queries(
+        [query, *(additional_queries or [])],
+        limit=3,
+    )
+    english_searches = unique_queries(
+        [english_query or "", *(english_queries or []), query],
+        limit=2,
+    )
     encoded_query = quote_plus(query)
-    encoded_english_query = quote_plus(english_query or query)
     logger.info("开始抓取真实新闻列表，关键词: %s", query)
 
-    google_sources = [
-        (
-            "zh",
-            "Google News 中文",
-            f"https://news.google.com/rss/search?"
-            f"q={encoded_query}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-        ),
-        (
-            "en",
-            "Google News English",
-            f"https://news.google.com/rss/search?"
-            f"q={encoded_english_query}&hl=en-US&gl=US&ceid=US:en",
-        ),
-    ]
+    google_sources: list[tuple[str, str, str]] = []
+    for index, search_query in enumerate(chinese_searches, start=1):
+        source_name = "Google News 中文" if index == 1 else f"Google News 中文 {index}"
+        google_sources.append(
+            (
+                "zh",
+                source_name,
+                "https://news.google.com/rss/search?"
+                f"q={quote_plus(search_query)}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+            )
+        )
+    for index, search_query in enumerate(english_searches, start=1):
+        source_name = "Google News English" if index == 1 else f"Google News English {index}"
+        google_sources.append(
+            (
+                "en",
+                source_name,
+                "https://news.google.com/rss/search?"
+                f"q={quote_plus(search_query)}&hl=en-US&gl=US&ceid=US:en",
+            )
+        )
 
     source_results: list[tuple[str, list[dict[str, Any]]]] = []
     errors: list[str] = []
@@ -445,6 +477,8 @@ def fetch_and_extract_batch(
     min_content_length: int = 200,
     article_callback: Callable[[dict[str, Any], int, int], None] | None = None,
     english_query: str | None = None,
+    additional_queries: list[str] | None = None,
+    english_queries: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     抓取新闻列表并并行提取正文，含质量预筛。
@@ -456,6 +490,8 @@ def fetch_and_extract_batch(
         min_content_length: 最低正文长度，低于此值直接跳过
         article_callback: 每提取到一篇有效文章时的回调
         english_query: 可选英文检索词
+        additional_queries: AI 生成的额外中文检索词
+        english_queries: AI 生成的英文检索词
 
     Returns:
         包含 title/url/source/published_at/content/content_hash 的字典列表
@@ -463,11 +499,13 @@ def fetch_and_extract_batch(
     # 多抓一些以备质量筛选
     # 保留少量候选供正文质量筛选，避免为 8 篇结果预先访问 16 个网站。
     fetch_count = max(8, max_articles + 4)
-    if english_query:
+    if english_query or additional_queries or english_queries:
         news_list = fetch_latest_news(
             query,
             max_articles=fetch_count,
             english_query=english_query,
+            additional_queries=additional_queries,
+            english_queries=english_queries,
         )
     else:
         news_list = fetch_latest_news(query, max_articles=fetch_count)
