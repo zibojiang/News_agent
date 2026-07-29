@@ -31,6 +31,7 @@ from agent import (
     get_gemini_model,
     get_openai_model,
     run_pipeline,
+    score_sources_with_ai,
 )
 from database import (
     JSON_COLUMNS,
@@ -109,6 +110,8 @@ def _is_current_quality_details(
     if not isinstance(quality_details, dict):
         return False
     if quality_details.get("rule_version") != NEWS_QUALITY_RULE_VERSION:
+        return False
+    if quality_details.get("source_score_method") != "ai":
         return False
     dimension_scores = quality_details.get("dimension_scores")
     if not isinstance(dimension_scores, dict):
@@ -432,10 +435,7 @@ def _render_score_breakdown(quality_details: dict) -> None:
     quality_warnings = quality_details.get("quality_warnings", [])
 
     dimensions = dict(BASE_QUALITY_DIMENSIONS)
-    dimensions["source_credibility"] = (
-        "来源权威度（规则预估）" if is_pre_score else "来源权威度（AI 评分）",
-        25,
-    )
+    dimensions["source_credibility"] = ("来源权威度（AI 评分）", 25)
     if not is_pre_score:
         dimensions.update(BODY_QUALITY_DIMENSIONS)
     bounded_scores = {
@@ -525,6 +525,9 @@ def _quality_state(quality: Any) -> dict[str, Any]:
         "penalties": penalties,
         "label": _quality_value(quality, "label", ""),
         "rule_version": _quality_value(quality, "rule_version", ""),
+        "source_score_method": _quality_value(
+            quality, "source_score_method", ""
+        ),
         "score_cap": _quality_value(quality, "score_cap", 100),
         "quality_warnings": list(
             _quality_value(quality, "quality_warnings", []) or []
@@ -550,6 +553,8 @@ def _persist_latest_search(
                 "language": str(article.get("language", "zh")),
                 "content": str(article.get("content", ""))[:500],
                 "quality_pre": _quality_state(article.get("quality_pre")),
+                "source_ai_scored": bool(article.get("source_ai_scored", False)),
+                "source_ai_error": str(article.get("source_ai_error", "")),
             }
         )
     summary_state = {
@@ -659,6 +664,9 @@ def _render_article_cards(
             pre_state,
             require_body=False,
         )
+        is_current_pre_version = (
+            pre_state.get("rule_version") == NEWS_QUALITY_RULE_VERSION
+        )
         pre_score = _bounded_dimension_score(
             pre_state.get("adjusted_score"),
             50,
@@ -678,10 +686,11 @@ def _render_article_cards(
         language_label = " · 🌐 英文" if article.get("language") == "en" else ""
         source_score = int(pre_dims.get("source_credibility", 0) or 0)
         source_label = ""
-        if source_score >= 22:
-            source_label = " · 🛡️ 来源预估：权威"
-        elif source_score >= 15:
-            source_label = " · 来源预估：主流"
+        if has_current_pre_score:
+            if source_score >= 22:
+                source_label = " · 🛡️ AI 评估：权威来源"
+            elif source_score >= 15:
+                source_label = " · AI 评估：主流来源"
 
         with st.container(border=True):
             cols = st.columns([3, 1])
@@ -728,6 +737,9 @@ def _render_article_cards(
                     if has_current_pre_score:
                         st.metric("基础分", f"{pre_score}/50")
                         st.caption("AI 正文质量分析中…")
+                    elif is_current_pre_version:
+                        st.metric("基础分", "计算中")
+                        st.caption("AI 正在评估来源权威度…")
                     else:
                         st.metric("基础分", "待更新")
                         st.caption("旧搜索记录，请重新搜索生成新版评分")

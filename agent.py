@@ -369,6 +369,189 @@ def _prepare_analysis_prompts(
     return system_prompt, user_prompt
 
 
+SOURCE_CREDIBILITY_SYSTEM_PROMPT = """你是一名新闻来源审查员。
+
+只评估新闻原始信息来源的权威度，不分析新闻主题相关性或正文写作质量。
+不要把 Google News、Bing、RSS 等聚合页当作原始发布者。结合提供的来源名、
+最终文章域名、标题和正文开头判断，并严格返回 0-25 分：
+
+- 23-25：政府、国际公共机构、顶级通讯社，或方法透明的顶级独立研究机构
+- 19-22：大型主流媒体、专业研究机构、知名企业官方一手报告
+- 14-18：可验证的行业媒体、一般企业官网或有明确编辑责任的来源
+- 8-13：网站身份或编辑标准无法充分确认；信息不足时保守评分
+- 0-7：内容农场、个人博客、无原始出处的聚合站或明显可疑来源
+
+企业官方材料具有一手性，但应考虑自述偏向。不得编造机构背景、奖项、受众规模
+或编辑制度。reason 必须简短说明可核对的判断依据。"""
+
+
+def _build_source_credibility_prompt(article: dict[str, Any]) -> str:
+    """组装独立来源权威度评分所需的最小输入。"""
+    content_excerpt = str(article.get("content", "")).strip()[:1500]
+    return f"""【来源名称】{article.get('source', '未知来源')}
+【文章网址】{article.get('url', '')}
+【新闻标题】{article.get('title', '')}
+【正文开头】
+{content_excerpt}
+
+请只输出 score 和 reason 字段。"""
+
+
+def analyze_source_credibility(
+    article: dict[str, Any],
+    provider: str | None = None,
+    model: str | None = None,
+) -> SourceCredibilitySchema:
+    """先于正文分析，使用当前 AI 提供方独立评估来源权威度。"""
+    provider_name = (provider or get_ai_provider()).strip().lower()
+    if provider_name not in {"openai", "gemini", "deepseek"}:
+        raise ValueError(
+            f"不支持的 AI_PROVIDER：{provider_name}，可选值为 openai、gemini 或 deepseek"
+        )
+
+    if provider_name == "gemini":
+        model_name = model or get_gemini_model()
+    else:
+        model_name = model or get_openai_model()
+    user_prompt = _build_source_credibility_prompt(article)
+    last_error = "AI 未返回有效的来源权威度评分"
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            if provider_name == "gemini":
+                response = _get_gemini_client().models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Content(
+                            role="user",
+                            parts=[
+                                types.Part(text=SOURCE_CREDIBILITY_SYSTEM_PROMPT),
+                                types.Part(text=user_prompt),
+                            ],
+                        )
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=SourceCredibilitySchema,
+                        temperature=0.1,
+                    ),
+                )
+                if not response.text:
+                    raise ValueError("Gemini 返回空响应")
+                return SourceCredibilitySchema.model_validate_json(response.text)
+
+            client = _get_openai_client()
+            if provider_name == "openai":
+                response = client.responses.parse(
+                    model=model_name,
+                    input=[
+                        {"role": "system", "content": SOURCE_CREDIBILITY_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    text_format=SourceCredibilitySchema,
+                )
+                if response.output_parsed is None:
+                    raise ValueError("OpenAI 返回空响应")
+                return response.output_parsed
+
+            thinking_mode = os.getenv(
+                "DEEPSEEK_THINKING", "disabled"
+            ).strip().lower()
+            if thinking_mode not in {"enabled", "disabled"}:
+                thinking_mode = "disabled"
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SOURCE_CREDIBILITY_SYSTEM_PROMPT
+                        + "\nRespond with a valid JSON object.",
+                    },
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+                extra_body={"thinking": {"type": thinking_mode}},
+            )
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError("DeepSeek 返回空响应")
+            return SourceCredibilitySchema.model_validate(json.loads(content))
+        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            last_error = f"来源权威度结构化输出无效（{type(exc).__name__}）"
+        except Exception as exc:
+            if provider_name == "gemini":
+                last_error = _classify_gemini_error(exc, model_name)
+            else:
+                last_error = _classify_openai_error(exc, model_name)
+        if attempt < MAX_RETRIES:
+            time.sleep(RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+
+    raise ArticleAnalysisError(f"来源权威度 AI 评分失败：{last_error}")
+
+
+def score_sources_with_ai(
+    articles: list[dict[str, Any]],
+    progress_callback: Callable[[str, float], None] | None = None,
+) -> list[str]:
+    """并行生成来源 AI 分数并更新文章的 50 分基础评分。"""
+    pending_indexes = [
+        index
+        for index, article in enumerate(articles)
+        if not (
+            isinstance(article.get("quality_pre"), QualitySummary)
+            and article["quality_pre"].source_score_method == "ai"
+        )
+    ]
+    if not pending_indexes:
+        return []
+
+    worker_count = min(get_ai_analysis_workers(), len(pending_indexes))
+    errors: list[str] = []
+    _notify_progress(
+        progress_callback,
+        f"AI 正在评估 {len(pending_indexes)} 个新闻来源（{worker_count} 路）…",
+        0.05,
+    )
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(analyze_source_credibility, articles[index]): index
+            for index in pending_indexes
+        }
+        completed = 0
+        for future in as_completed(futures):
+            index = futures[future]
+            article = articles[index]
+            try:
+                result = future.result()
+                pre_score = article.get("quality_pre")
+                if not isinstance(pre_score, QualitySummary):
+                    pre_score = score_article_pre_ai(
+                        title=str(article.get("title", "")),
+                        url=str(article.get("url", "")),
+                        content=str(article.get("content", "")),
+                        source=str(article.get("source", "")),
+                        published_at=str(article.get("published_at", "")),
+                        keyword="",
+                        content_hash=str(article.get("content_hash", "")),
+                    )
+                    article["quality_pre"] = pre_score
+                apply_ai_source_score(pre_score, result.score, result.reason)
+                article["source_ai_scored"] = True
+                article.pop("source_ai_error", None)
+            except Exception as exc:
+                reason = str(exc)
+                article["source_ai_scored"] = False
+                article["source_ai_error"] = reason
+                errors.append(f"{article.get('title', '无标题')}：{reason}")
+            completed += 1
+            _notify_progress(
+                progress_callback,
+                f"来源权威度已完成 {completed}/{len(pending_indexes)} 篇…",
+                completed / len(pending_indexes),
+            )
+    return errors
+
+
 def _normalize_analysis_result(
     parsed: NewsCaseSchema,
     article_title: str,
@@ -898,6 +1081,8 @@ def run_pipeline(
         "trigger_type": trigger_type,
         "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "processed": 0,
+        "source_scored": 0,
+        "source_failed": 0,
         "analyzed": 0,
         "analysis_failed": 0,
         "news_saved": 0,
@@ -949,6 +1134,43 @@ def run_pipeline(
                 return summary
         else:
             articles = pre_fetched_articles
+
+        for article in articles:
+            if not isinstance(article.get("quality_pre"), QualitySummary):
+                article["quality_pre"] = score_article_pre_ai(
+                    title=str(article.get("title", "")),
+                    url=str(article.get("url", "")),
+                    content=str(article.get("content", "")),
+                    source=str(article.get("source", "")),
+                    published_at=str(article.get("published_at", "")),
+                    keyword=industry_keyword,
+                    content_hash=str(article.get("content_hash", "")),
+                )
+
+        if any(
+            article["quality_pre"].source_score_method != "ai"
+            for article in articles
+        ):
+            source_errors = score_sources_with_ai(
+                articles,
+                progress_callback=lambda message, value: _notify_progress(
+                    progress_callback,
+                    message,
+                    0.05 + 0.1 * value,
+                ),
+            )
+            if source_errors:
+                logger.warning(
+                    "%d 篇来源预评分失败，将由完整分析结果兜底",
+                    len(source_errors),
+                )
+
+        summary["source_scored"] = sum(
+            1
+            for article in articles
+            if article["quality_pre"].source_score_method == "ai"
+        )
+        summary["source_failed"] = len(articles) - summary["source_scored"]
 
         total_articles = len(articles)
         _notify_progress(
@@ -1048,10 +1270,14 @@ def run_pipeline(
             ai_data = {
                 "title": result.title,
                 "content": article.get("content", ""),
-                "sourceCredibilityScore": result.source_credibility_score,
-                "sourceCredibilityReason": result.source_credibility_reason,
                 "bodyQuality": result.body_quality.model_dump(),
             }
+            if not (
+                isinstance(pre_score, QualitySummary)
+                and pre_score.source_score_method == "ai"
+            ):
+                ai_data["sourceCredibilityScore"] = result.source_credibility_score
+                ai_data["sourceCredibilityReason"] = result.source_credibility_reason
             if isinstance(pre_score, QualitySummary):
                 quality = enrich_with_ai_result(pre_score, ai_data)
             else:
@@ -1103,6 +1329,7 @@ def run_pipeline(
                     "label_description": quality.label_description,
                     "rule_version": quality.rule_version,
                     "ai_confidence": quality.ai_confidence,
+                    "source_score_method": quality.source_score_method,
                     "score_cap": quality.score_cap,
                     "quality_warnings": quality.quality_warnings,
                 },
