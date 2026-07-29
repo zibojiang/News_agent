@@ -15,7 +15,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote_plus
 
 import requests
@@ -35,7 +35,7 @@ DEFAULT_HEADERS = {
 }
 
 # 网络请求超时（秒）
-REQUEST_TIMEOUT = 30
+REQUEST_TIMEOUT = 15
 
 # 单次抓取最大文章数（避免 API 调用过多）
 MAX_ARTICLES_PER_RUN = 8
@@ -369,8 +369,9 @@ def extract_article_text(
 def fetch_and_extract_batch(
     query: str,
     max_articles: int = MAX_ARTICLES_PER_RUN,
-    max_workers: int = 6,
+    max_workers: int = 8,
     min_content_length: int = 200,
+    article_callback: Callable[[dict[str, Any], int, int], None] | None = None,
 ) -> list[dict[str, Any]]:
     """
     抓取新闻列表并并行提取正文，含质量预筛。
@@ -380,6 +381,7 @@ def fetch_and_extract_batch(
         max_articles: 最大返回文章数
         max_workers: 并行提取的最大线程数
         min_content_length: 最低正文长度，低于此值直接跳过
+        article_callback: 每提取到一篇有效文章时的回调
 
     Returns:
         包含 title/url/source/published_at/content/content_hash 的字典列表
@@ -412,16 +414,25 @@ def fetch_and_extract_batch(
             ).hexdigest(),
         }
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    reached_limit = False
+    try:
         futures = {executor.submit(_extract_one, item): item for item in news_list}
         for future in as_completed(futures):
             result = future.result()
             if result is not None:
                 results.append(result)
+                if article_callback is not None:
+                    try:
+                        article_callback(result, len(results), max_articles)
+                    except Exception as exc:
+                        logger.warning("文章进度回调失败: %s", type(exc).__name__)
                 if len(results) >= max_articles:
-                    for f in futures:
-                        f.cancel()
+                    reached_limit = True
                     break
+    finally:
+        # 已凑够目标文章时立即返回，不再等待剩余慢站点超时。
+        executor.shutdown(wait=not reached_limit, cancel_futures=reached_limit)
 
     logger.info("提取完成 %d/%d 篇有效正文",
                 len(results), len(news_list))

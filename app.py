@@ -176,6 +176,7 @@ st.markdown(
     .search-form-note {color: var(--muted); font-size: .9rem; margin-bottom: .85rem;}
     .search-examples {color: #667085; font-size: .82rem; line-height: 1.6; margin: .45rem 0 .2rem;}
     .search-examples strong {color: #475467;}
+    .article-found-status {color: #16803c; font-size: .92rem; font-weight: 760; margin-bottom: .35rem;}
     [data-testid="stSidebar"] {border-right: 1px solid var(--line);}
     div[data-testid="stExpander"] {border-color: var(--line); border-radius: 12px;}
     .footer-note {color: #98a2b3; font-size: .78rem; text-align: center; margin-top: 2rem;}
@@ -413,7 +414,7 @@ def _render_article_cards(
     )
     analyzed_count = len(results) if results else 0
 
-    st.markdown(f"### 📰 搜索到的文章（{len(articles)}篇）")
+    st.markdown(f"### 📰 已搜索到的文章（{len(articles)}篇）")
     if results:
         analyzed_score = sum(
             r.get("quality_score", 0) for r in (results or {}).values()
@@ -423,6 +424,8 @@ def _render_article_cards(
             f" | 预筛均分 {total_pre_score // len(articles)} → 综合均分 "
             f"{analyzed_score // max(analyzed_count, 1)}"
         )
+    else:
+        st.caption("新闻已搜索到，可以先浏览标题和原文；AI 分析会在后台继续。")
 
     for idx, article in enumerate(articles):
         pre = article.get("quality_pre")
@@ -458,8 +461,12 @@ def _render_article_cards(
                     store = result.get("storage_status", "?")
                     st.caption(f"AI: {status} | 写入: {store}")
                 else:
+                    st.markdown(
+                        '<div class="article-found-status">✓ 已搜索到</div>',
+                        unsafe_allow_html=True,
+                    )
                     st.metric("新闻预筛质量", f"{pre_score}分")
-                    st.caption("等待 AI 分析…")
+                    st.caption("AI 分析中…")
 
             if result and result.get("analysis_status") == "成功":
                 with st.expander(f"📊 评分详情（{result.get('quality_score', 0) or 0}分）"):
@@ -849,12 +856,26 @@ def _render_search_page(cloud_demo: bool) -> None:
             st.session_state.last_search_keyword = keyword
             st.session_state.pop("last_run_summary", None)
             st.session_state.pop("fetched_results", None)
+            st.session_state.pop("fetched_articles", None)
+            st.session_state.pop("pending_analysis", None)
+            live_articles: list[dict[str, Any]] = []
+            live_result_area = st.empty()
+
+            def show_found_article(
+                article: dict[str, Any], found: int, total: int
+            ) -> None:
+                live_articles.append(article)
+                live_result_area.empty()
+                with live_result_area.container():
+                    _render_article_cards(live_articles, keyword)
+
             search_started = perf_counter()
             with st.spinner(f"正在搜索「{keyword}」相关的新闻…"):
                 try:
                     articles = fetch_and_pre_score(
                         industry_keyword=keyword,
                         max_articles=int(max_articles),
+                        article_callback=show_found_article,
                     )
                 except Exception as exc:
                     logger.error("搜索失败: %s", exc, exc_info=True)
@@ -865,54 +886,57 @@ def _render_search_page(cloud_demo: bool) -> None:
             if articles:
                 st.session_state.fetched_articles = articles
                 st.session_state.fetched_keyword = keyword
-                result_area = st.empty()
-                with result_area.container():
-                    _render_article_cards(articles, keyword)
-
-                st.markdown("### AI 正在并行分析")
-                progress_bar = st.progress(0.0, text="准备分析…")
-
-                def update_progress(message: str, value: float) -> None:
-                    progress_bar.progress(value, text=message)
-
-                try:
-                    analysis_started = perf_counter()
-                    run_summary = run_pipeline(
-                        industry_keyword=keyword,
-                        min_score=int(min_score),
-                        max_articles=int(max_articles),
-                        topic=None,
-                        trigger_type="manual",
-                        progress_callback=update_progress,
-                        pre_fetched_articles=articles,
-                    )
-                    run_summary["search_seconds"] = search_seconds
-                    run_summary["analysis_seconds"] = (
-                        perf_counter() - analysis_started
-                    )
-                    result_map = {
-                        index: detail
-                        for index, detail in enumerate(run_summary.get("details", []))
-                    }
-                    st.session_state.last_run_summary = run_summary
-                    st.session_state.fetched_results = result_map
-                    progress_bar.progress(1.0, text="分析完成")
-                    result_area.empty()
-                    with result_area.container():
-                        _render_article_cards(articles, keyword, result_map)
-                except ValueError as exc:
-                    st.error(f"配置错误：{exc}")
-                except Exception as exc:
-                    logger.error("手动任务失败: %s", exc, exc_info=True)
-                    st.error(f"分析失败：{exc}")
+                st.session_state.pending_analysis = {
+                    "keyword": keyword,
+                    "min_score": int(min_score),
+                    "max_articles": int(max_articles),
+                    "search_seconds": search_seconds,
+                }
+                st.rerun()
             else:
                 st.warning("没有找到可分析的文章。请尝试更具体或更常见的关键词。")
-    elif st.session_state.get("fetched_articles"):
+
+    if not run_button and st.session_state.get("fetched_articles"):
+        articles = st.session_state.fetched_articles
         _render_article_cards(
-            st.session_state.fetched_articles,
+            articles,
             st.session_state.get("fetched_keyword", ""),
             st.session_state.get("fetched_results"),
         )
+
+        pending_analysis = st.session_state.pop("pending_analysis", None)
+        if pending_analysis:
+            st.markdown("### AI 正在并行分析")
+            progress_bar = st.progress(0.0, text="已展示新闻，正在准备 AI 分析…")
+
+            def update_progress(message: str, value: float) -> None:
+                progress_bar.progress(value, text=message)
+
+            try:
+                analysis_started = perf_counter()
+                run_summary = run_pipeline(
+                    industry_keyword=pending_analysis["keyword"],
+                    min_score=pending_analysis["min_score"],
+                    max_articles=pending_analysis["max_articles"],
+                    topic=None,
+                    trigger_type="manual",
+                    progress_callback=update_progress,
+                    pre_fetched_articles=articles,
+                )
+                run_summary["search_seconds"] = pending_analysis["search_seconds"]
+                run_summary["analysis_seconds"] = perf_counter() - analysis_started
+                st.session_state.last_run_summary = run_summary
+                st.session_state.fetched_results = {
+                    index: detail
+                    for index, detail in enumerate(run_summary.get("details", []))
+                }
+                progress_bar.progress(1.0, text="分析完成")
+                st.rerun()
+            except ValueError as exc:
+                st.error(f"配置错误：{exc}")
+            except Exception as exc:
+                logger.error("手动任务失败: %s", exc, exc_info=True)
+                st.error(f"分析失败：{exc}")
 
     last_run_summary = st.session_state.get("last_run_summary")
     if last_run_summary:

@@ -680,6 +680,7 @@ def _classify_topic_posthoc(
 def fetch_and_pre_score(
     industry_keyword: str,
     max_articles: int = 8,
+    article_callback: Callable[[dict[str, Any], int, int], None] | None = None,
 ) -> list[dict[str, Any]]:
     """抓取新闻列表并执行预 AI 质量评分（纯算法），返回文章列表供前端展示。
 
@@ -689,15 +690,12 @@ def fetch_and_pre_score(
     Args:
         industry_keyword: 行业关键词
         max_articles: 单次最多处理文章数
+        article_callback: 每找到一篇有效文章时的回调
 
     Returns:
         已含 quality_pre 字段的文章列表
     """
-    articles = fetch_and_extract_batch(
-        industry_keyword, max_articles=max_articles
-    )
-
-    for article in articles:
+    def score_and_notify(article: dict[str, Any], found: int, total: int) -> None:
         article["quality_pre"] = score_article_pre_ai(
             title=article["title"],
             url=article["url"],
@@ -707,6 +705,19 @@ def fetch_and_pre_score(
             keyword=industry_keyword,
             content_hash=str(article.get("content_hash", "")),
         )
+        if article_callback is not None:
+            article_callback(article, found, total)
+
+    articles = fetch_and_extract_batch(
+        industry_keyword,
+        max_articles=max_articles,
+        article_callback=score_and_notify,
+    )
+
+    # 兼容自定义抓取器或测试替身没有执行回调的情况。
+    for article in articles:
+        if "quality_pre" not in article:
+            score_and_notify(article, 0, max_articles)
 
     return articles
 

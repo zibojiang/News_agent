@@ -37,6 +37,23 @@ class AppSmokeTestCase(unittest.TestCase):
                     any("半导体产业研报" in markdown.value for markdown in app.markdown)
                 )
 
+                app.session_state["fetched_articles"] = [
+                    {
+                        "title": "复星 AI 测试新闻",
+                        "url": "https://example.com/news",
+                        "source": "测试媒体",
+                        "published_at": "2026-07-29 10:00:00",
+                    }
+                ]
+                app.session_state["fetched_keyword"] = "复星AI"
+                app.run(timeout=20)
+                self.assertTrue(
+                    any("已搜索到的文章（1篇）" in markdown.value for markdown in app.markdown)
+                )
+                self.assertTrue(
+                    any("✓ 已搜索到" in markdown.value for markdown in app.markdown)
+                )
+
                 management_button = next(
                     button for button in app.button if button.label == "⚙️"
                 )
