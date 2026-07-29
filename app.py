@@ -45,6 +45,7 @@ from database import (
     update_case_review_status,
     update_topic,
 )
+from quality_scorer import NEWS_QUALITY_RULE_VERSION
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,6 +82,59 @@ def _quality_label_badge(label: str) -> str:
         "较低": "🔴",
     }
     return mapping.get(label, "⚪") + " " + label
+
+
+BASE_QUALITY_DIMENSIONS = {
+    "source_credibility": ("来源权威度", 25),
+    "content_density": ("信息密度", 10),
+    "data_richness": ("数据含量", 10),
+    "freshness": ("时效性", 5),
+}
+BODY_QUALITY_DIMENSIONS = {
+    "evidence_quality": ("正文证据与可核验性", 15),
+    "completeness": ("报道完整性", 10),
+    "transparency": ("信源与方法透明度", 10),
+    "headline_body_consistency": ("标题正文一致性", 5),
+    "balance": ("客观与平衡性", 5),
+    "clarity": ("清晰与连贯性", 5),
+}
+
+
+def _is_current_quality_details(
+    quality_details: Any,
+    *,
+    require_body: bool,
+) -> bool:
+    """判断评分详情是否完整符合当前规则，避免混用旧版分数。"""
+    if not isinstance(quality_details, dict):
+        return False
+    if quality_details.get("rule_version") != NEWS_QUALITY_RULE_VERSION:
+        return False
+    dimension_scores = quality_details.get("dimension_scores")
+    if not isinstance(dimension_scores, dict):
+        return False
+    required = set(BASE_QUALITY_DIMENSIONS)
+    if require_body:
+        required.update(BODY_QUALITY_DIMENSIONS)
+    if not required.issubset(dimension_scores):
+        return False
+    maxima = {**BASE_QUALITY_DIMENSIONS, **BODY_QUALITY_DIMENSIONS}
+    for key in required:
+        value = dimension_scores.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        if not 0 <= value <= maxima[key][1]:
+            return False
+    return True
+
+
+def _bounded_dimension_score(value: Any, maximum: int) -> int:
+    """将展示分数限制在当前维度的合法范围内。"""
+    try:
+        score = int(round(float(value)))
+    except (TypeError, ValueError):
+        score = 0
+    return max(0, min(maximum, score))
 
 def _enrich_with_quality(df: pd.DataFrame) -> pd.DataFrame:
     """从 quality_json 提取 quality_score 和 quality_label 到 DataFrame。"""
@@ -358,96 +412,81 @@ def _render_run_summary(summary: dict[str, Any]) -> None:
 
 def _render_score_breakdown(quality_details: dict) -> None:
     """在 expander 中展示文章质量评分的各维度明细。"""
+    quality_label = quality_details.get("label", "")
+    is_pre_score = quality_label == "预筛"
+    if not _is_current_quality_details(
+        quality_details,
+        require_body=not is_pre_score,
+    ):
+        st.info(
+            "这条记录使用的是旧版评分，不能按当前 100 分制换算。"
+            "请重新搜索并完成 AI 分析后查看新版评分。"
+        )
+        return
+
     dim_scores = quality_details.get("dimension_scores", {})
     dim_reasons = quality_details.get("dimension_reasons", {})
     penalties = quality_details.get("penalties", [])
     total = quality_details.get("total_score", 0)
     adjusted = quality_details.get("adjusted_score", total)
-    quality_label = quality_details.get("label", "")
     quality_warnings = quality_details.get("quality_warnings", [])
 
-    dim_labels = {
-        "source_credibility": "来源权威度",
-        "content_density": "信息密度",
-        "data_richness": "数据含量",
-        "freshness": "时效性",
-        "evidence_quality": "正文证据与可核验性",
-        "completeness": "报道完整性",
-        "transparency": "信源与方法透明度",
-        "headline_body_consistency": "标题正文一致性",
-        "balance": "客观与平衡性",
-        "clarity": "清晰与连贯性",
+    dimensions = {
+        **BASE_QUALITY_DIMENSIONS,
+        **({} if is_pre_score else BODY_QUALITY_DIMENSIONS),
     }
-    dim_max_scores = {
-        "source_credibility": 25,
-        "content_density": 10,
-        "data_richness": 10,
-        "freshness": 5,
-        "evidence_quality": 15,
-        "completeness": 10,
-        "transparency": 10,
-        "headline_body_consistency": 5,
-        "balance": 5,
-        "clarity": 5,
+    bounded_scores = {
+        key: _bounded_dimension_score(dim_scores.get(key), maximum)
+        for key, (_, maximum) in dimensions.items()
     }
     items: list[str] = []
-    for key, label in dim_labels.items():
-        score = dim_scores.get(key, 0)
+    for key, (label, maximum) in dimensions.items():
+        score = bounded_scores[key]
         reason = dim_reasons.get(key, "")
         if score > 0 or reason:
-            items.append(f"{label}（{score}/{dim_max_scores[key]}）")
+            items.append(f"{label}（{score}/{maximum}）")
     total_deduction = sum(p.get("deduction", 0) for p in penalties)
 
     formula_parts = " + ".join(items) if items else "无维度数据"
     if total_deduction > 0:
         formula_parts += f" — 扣分（{total_deduction}分）"
-    is_pre_score = quality_label == "预筛"
-    if is_pre_score:
-        heading = f"预筛基础分 {adjusted}/50"
-    else:
-        heading = f"综合质量 {adjusted}/100"
-    if quality_label and not is_pre_score:
-        heading += f" · {quality_label}"
-    st.markdown(f"#### ⭐ {heading}")
     base_score = sum(
-        int(dim_scores.get(key, 0) or 0)
-        for key in (
-            "source_credibility",
-            "content_density",
-            "data_richness",
-            "freshness",
-        )
+        bounded_scores[key] for key in BASE_QUALITY_DIMENSIONS
     )
-    if "evidence_quality" in dim_scores:
-        body_score = int(
-            quality_details.get(
-                "body_quality_score",
-                sum(
-                    int(dim_scores.get(key, 0) or 0)
-                    for key in (
-                        "evidence_quality",
-                        "completeness",
-                        "transparency",
-                        "headline_body_consistency",
-                        "balance",
-                        "clarity",
-                    )
-                ),
-            )
-            or 0
-        )
-        st.caption(f"基础维度 {base_score}/50 · AI 正文质量 {body_score}/50")
+    if is_pre_score:
+        pre_score = max(0, min(50, int(adjusted or 0)))
+        st.markdown(f"#### ⭐ 基础分 {pre_score}/50")
+        st.caption("基础评分已完成；AI 分析完成后会再生成 50 分正文质量分。")
     else:
-        st.caption(f"基础维度 {base_score}/50 · 等待 AI 正文质量评分")
+        body_score = sum(
+            bounded_scores[key] for key in BODY_QUALITY_DIMENSIONS
+        )
+        adjusted = max(0, min(100, int(adjusted or 0)))
+        heading = f"综合质量 {adjusted}/100"
+        if quality_label:
+            heading += f" · {quality_label}"
+        st.markdown(f"#### ⭐ {heading}")
+        equation = f"基础分 {base_score}/50 + AI 正文质量 {body_score}/50"
+        if total_deduction > 0:
+            equation += f" - 扣分 {total_deduction}"
+        score_cap = max(
+            0,
+            min(100, int(quality_details.get("score_cap", 100) or 100)),
+        )
+        if score_cap < 100:
+            equation += f"，规则封顶 {score_cap}"
+        st.markdown(
+            f"**{equation} = 综合质量 {adjusted}/100**"
+        )
     st.caption(f"计算方式：{formula_parts}")
     for warning in quality_warnings:
         st.warning(str(warning))
 
-    for key, label in dim_labels.items():
-        score = dim_scores.get(key, 0)
+    for key, (label, maximum) in dimensions.items():
+        score = bounded_scores[key]
         reason = dim_reasons.get(key, "")
         if score > 0 or reason:
-            st.markdown(f"**{label}：{score}/{dim_max_scores[key]} 分**")
+            st.markdown(f"**{label}：{score}/{maximum} 分**")
             if reason:
                 st.caption(reason)
     for penalty in penalties:
@@ -482,6 +521,7 @@ def _quality_state(quality: Any) -> dict[str, Any]:
         ),
         "penalties": penalties,
         "label": _quality_value(quality, "label", ""),
+        "rule_version": _quality_value(quality, "rule_version", ""),
         "score_cap": _quality_value(quality, "score_cap", 100),
         "quality_warnings": list(
             _quality_value(quality, "quality_warnings", []) or []
@@ -574,37 +614,60 @@ def _render_article_cards(
     if not articles:
         return
 
-    total_pre_score = sum(
-        int(_quality_value(a.get("quality_pre"), "adjusted_score", 0) or 0)
-        for a in articles
-    )
+    current_pre_scores = []
+    for article in articles:
+        pre_state = _quality_state(article.get("quality_pre"))
+        if _is_current_quality_details(pre_state, require_body=False):
+            current_pre_scores.append(
+                _bounded_dimension_score(pre_state.get("adjusted_score"), 50)
+            )
     analyzed_count = len(results) if results else 0
 
     st.markdown(f"### 📰 已搜索到的文章（{len(articles)}篇）")
     if results:
-        analyzed_score = sum(
-            r.get("quality_score", 0) for r in (results or {}).values()
-        )
-        st.caption(
-            f"已完成 AI 分析 {analyzed_count}/{len(articles)} 篇"
-            f" | 预筛基础均分 {total_pre_score // len(articles)}/50"
-            f" → 综合质量均分 {analyzed_score // max(analyzed_count, 1)}/100"
-        )
+        current_final_scores = [
+            _bounded_dimension_score(result.get("quality_score"), 100)
+            for result in results.values()
+            if _is_current_quality_details(
+                result.get("quality_details"),
+                require_body=True,
+            )
+        ]
+        summary_parts = [f"已完成 AI 分析 {analyzed_count}/{len(articles)} 篇"]
+        if current_pre_scores:
+            summary_parts.append(
+                f"基础均分 {sum(current_pre_scores) // len(current_pre_scores)}/50"
+            )
+        if current_final_scores:
+            summary_parts.append(
+                f"综合质量均分 {sum(current_final_scores) // len(current_final_scores)}/100"
+            )
+        legacy_count = analyzed_count - len(current_final_scores)
+        if legacy_count > 0:
+            summary_parts.append(f"{legacy_count} 篇旧版评分待更新")
+        st.caption(" · ".join(summary_parts))
     else:
         st.caption("新闻已搜索到，可以先浏览标题和原文；AI 分析会在后台继续。")
 
     for idx, article in enumerate(articles):
         pre = article.get("quality_pre")
-        pre_score = int(
-            _quality_value(
-                pre,
-                "adjusted_score",
-                _quality_value(pre, "total_score", 0),
-            ) or 0
+        pre_state = _quality_state(pre)
+        has_current_pre_score = _is_current_quality_details(
+            pre_state,
+            require_body=False,
+        )
+        pre_score = _bounded_dimension_score(
+            pre_state.get("adjusted_score"),
+            50,
         )
         pre_dims = dict(_quality_value(pre, "dimension_scores", {}) or {})
 
         result = (results or {}).get(idx)
+        quality_json = result.get("quality_details") if result else None
+        has_current_final_score = _is_current_quality_details(
+            quality_json,
+            require_body=True,
+        )
         title = article.get("title", "无标题")
         source = article.get("source", "未知来源")
         url = article.get("url", "#")
@@ -640,10 +703,17 @@ def _render_article_cards(
             with cols[1]:
                 if result:
                     relevance = result.get("score", 0) or 0
-                    quality = result.get("quality_score", 0) or 0
-                    label = result.get("quality_label", "")
                     st.metric("相关性", f"{relevance}分")
-                    st.metric("综合质量", f"{quality}/100", label)
+                    if has_current_final_score:
+                        quality = _bounded_dimension_score(
+                            result.get("quality_score"),
+                            100,
+                        )
+                        label = result.get("quality_label", "")
+                        st.metric("综合质量", f"{quality}/100", label)
+                    elif result.get("analysis_status") == "成功":
+                        st.metric("综合质量", "待更新")
+                        st.caption("旧版评分不能换算为新版 100 分制")
                     status = result.get("analysis_status", "?")
                     store = result.get("storage_status", "?")
                     st.caption(f"AI: {status} | 写入: {store}")
@@ -652,25 +722,35 @@ def _render_article_cards(
                         '<div class="article-found-status">✓ 已搜索到</div>',
                         unsafe_allow_html=True,
                     )
-                    st.metric("预筛基础分", f"{pre_score}/50")
-                    st.caption("AI 分析中…")
+                    if has_current_pre_score:
+                        st.metric("基础分", f"{pre_score}/50")
+                        st.caption("AI 正文质量分析中…")
+                    else:
+                        st.metric("基础分", "待更新")
+                        st.caption("旧搜索记录，请重新搜索生成新版评分")
 
             if result and result.get("analysis_status") == "成功":
-                quality_score = result.get("quality_score", 0) or 0
-                quality_label = result.get("quality_label", "")
-                with st.expander(
-                    f"⭐ 查看完整评分｜{quality_score}/100 · {quality_label}"
-                ):
-                    quality_json = result.get("quality_details")
-                    if quality_json:
+                if has_current_final_score:
+                    quality_score = _bounded_dimension_score(
+                        result.get("quality_score"),
+                        100,
+                    )
+                    quality_label = result.get("quality_label", "")
+                    expander_label = (
+                        f"⭐ 查看完整评分｜{quality_score}/100 · {quality_label}"
+                    )
+                else:
+                    expander_label = "⭐ 旧版评分待更新"
+                with st.expander(expander_label):
+                    if isinstance(quality_json, dict):
                         _render_score_breakdown(quality_json)
                     else:
                         st.caption("暂无评分明细")
                     reason = result.get("reason", "")
                     if reason:
                         st.caption(f"判定理由：{reason}")
-            elif not result:
-                with st.expander(f"⭐ 查看评分依据｜预筛 {pre_score}/50"):
+            elif not result and has_current_pre_score:
+                with st.expander(f"⭐ 查看基础评分｜{pre_score}/50"):
                     if pre_dims:
                         _render_score_breakdown({
                             "total_score": _quality_value(pre, "total_score", pre_score),
@@ -681,6 +761,9 @@ def _render_article_cards(
                             ),
                             "penalties": _quality_state(pre)["penalties"],
                             "label": _quality_value(pre, "label", ""),
+                            "rule_version": _quality_value(
+                                pre, "rule_version", ""
+                            ),
                             "quality_warnings": _quality_value(
                                 pre, "quality_warnings", []
                             ),

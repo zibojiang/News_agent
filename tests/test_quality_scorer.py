@@ -146,6 +146,7 @@ class TestContentDensity(unittest.TestCase):
         content = "这是一篇很长的文章。" * 150  # ~1200 chars
         score, _ = compute_content_density(content)
         self.assertGreaterEqual(score, 6)
+        self.assertLessEqual(score, 10)
 
     def test_short_content_cutoff(self):
         content = "太短了"
@@ -159,6 +160,7 @@ class TestDataRichness(unittest.TestCase):
         content = "营收45.6亿元。同比增长23%。客流量突破850万人次。" * 30
         score, _ = compute_data_richness(content)
         self.assertGreaterEqual(score, 5)
+        self.assertLessEqual(score, 10)
 
     def test_no_data(self):
         content = "没有数字的文章内容。" * 30
