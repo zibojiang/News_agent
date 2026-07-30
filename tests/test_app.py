@@ -498,10 +498,22 @@ class AppSmokeTestCase(unittest.TestCase):
                 management_button = next(
                     button for button in app.button if button.label == "⚙️"
                 )
+                app.session_state["active_search_task_id"] = "test-running-task"
                 management_button.click().run(timeout=20)
                 self.assertEqual(list(app.exception), [])
+                self.assertEqual(
+                    app.session_state["active_search_task_id"],
+                    "test-running-task",
+                )
                 self.assertTrue(
                     any("管理台" in markdown.value for markdown in app.markdown)
+                )
+                tab_labels = [tab.label for tab in app.tabs]
+                self.assertIn("🗂️ 数据库管理", tab_labels)
+                self.assertIn("✅ 人工审核", tab_labels)
+                self.assertIn("⚙️ 系统设置", tab_labels)
+                self.assertTrue(
+                    any("当前 AI 配置" in markdown.value for markdown in app.markdown)
                 )
 
 

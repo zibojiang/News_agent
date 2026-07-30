@@ -60,6 +60,7 @@ from result_table import (
     csv_bytes,
     selected_export_rows,
 )
+from search_task import get_background_search, start_background_search
 
 logging.basicConfig(
     level=logging.INFO,
@@ -744,11 +745,7 @@ def _persist_latest_search(
                 ),
             }
         )
-    summary_state = {
-        key: value
-        for key, value in (run_summary or {}).items()
-        if key != "cases"
-    }
+    summary_state = dict(run_summary or {})
     state = {
         "keyword": keyword,
         "articles": stored_articles,
@@ -1131,6 +1128,126 @@ def _render_article_cards(
 
 def _set_active_view(view: str) -> None:
     st.session_state.active_view = view
+
+
+def _active_search_task_id() -> str:
+    """从会话或 URL 中恢复当前后台搜索任务。"""
+    task_id = str(st.session_state.get("active_search_task_id") or "").strip()
+    if not task_id:
+        query_task = st.query_params.get("search_task", "")
+        task_id = str(query_task or "").strip()
+        if task_id:
+            st.session_state.active_search_task_id = task_id
+    return task_id
+
+
+def _clear_active_search_task() -> None:
+    st.session_state.pop("active_search_task_id", None)
+    if "search_task" in st.query_params:
+        del st.query_params["search_task"]
+
+
+def _apply_completed_search_task(snapshot: dict[str, Any]) -> None:
+    """将后台结果接回当前会话，并按现有格式持久化。"""
+    articles = list(snapshot.get("articles") or [])
+    if not articles:
+        st.session_state.search_task_notice = str(
+            snapshot.get("message") or "没有找到可分析的文章。"
+        )
+        _clear_active_search_task()
+        return
+    results = {
+        int(index): detail
+        for index, detail in dict(snapshot.get("results") or {}).items()
+        if isinstance(detail, dict)
+    }
+    keyword = str(snapshot.get("keyword") or "")
+    search_intent = dict(snapshot.get("search_intent") or {})
+    run_summary = dict(snapshot.get("run_summary") or {})
+    st.session_state.fetched_articles = articles
+    st.session_state.fetched_keyword = keyword
+    st.session_state.fetched_search_intent = search_intent
+    st.session_state.fetched_results = results
+    st.session_state.last_run_summary = run_summary
+    _persist_latest_search(
+        keyword,
+        articles,
+        results,
+        run_summary,
+        search_intent=search_intent,
+    )
+    _clear_active_search_task()
+
+
+@st.fragment(run_every=2)
+def _render_active_search_task(task_id: str) -> None:
+    """自动轮询后台搜索；切换管理台不会销毁该 fragment 之外的任务。"""
+    snapshot = get_background_search(task_id)
+    if snapshot is None:
+        st.error("后台搜索任务已不存在，可能是应用进程重新启动。")
+        if st.button("清除失效任务", key=f"clear_missing_task_{task_id}"):
+            _clear_active_search_task()
+            st.rerun()
+        return
+    status = str(snapshot.get("status") or "running")
+    if status == "completed":
+        _apply_completed_search_task(snapshot)
+        st.rerun()
+    if status == "failed":
+        st.error(f"后台搜索失败：{snapshot.get('error') or snapshot.get('message')}")
+        if st.button("关闭失败任务", key=f"clear_failed_task_{task_id}"):
+            _clear_active_search_task()
+            st.rerun()
+        return
+
+    stage_labels = {
+        "queued": "任务排队",
+        "search": "搜索与正文提取",
+        "source": "相关性与来源初筛",
+        "body": "正文质量分析",
+    }
+    stage = str(snapshot.get("stage") or "queued")
+    st.markdown(f"### ⏳ 后台任务 · {stage_labels.get(stage, stage)}")
+    st.progress(
+        float(snapshot.get("progress", 0.0) or 0.0),
+        text=str(snapshot.get("message") or "后台任务运行中…"),
+    )
+    st.caption("你可以进入管理台查看其他数据；搜索和 AI 分析会继续运行。")
+    articles = list(snapshot.get("articles") or [])
+    if articles:
+        _render_article_cards(
+            articles,
+            str(snapshot.get("keyword") or ""),
+            snapshot.get("results"),
+        )
+
+
+def _render_background_task_banner() -> None:
+    """在管理台提示仍在运行或已完成的用户搜索。"""
+    task_id = _active_search_task_id()
+    if not task_id:
+        return
+    snapshot = get_background_search(task_id)
+    if snapshot is None:
+        st.warning("先前的搜索任务已失效，请返回搜索页重新发起。")
+        return
+    status = str(snapshot.get("status") or "running")
+    if status == "running":
+        st.info(
+            f"后台搜索仍在运行：{snapshot.get('message', '')} "
+            "你可以继续使用管理台。"
+        )
+        st.progress(float(snapshot.get("progress", 0.0) or 0.0))
+    elif status == "completed":
+        st.success("后台搜索和 AI 分析已经完成，返回搜索页即可查看结果。")
+    else:
+        st.error(f"后台搜索失败：{snapshot.get('error', '')}")
+    st.button(
+        "返回搜索查看任务",
+        key="management_open_search_task",
+        on_click=_set_active_view,
+        args=("search",),
+    )
 
 
 def _render_news_pool() -> None:
@@ -1568,13 +1685,21 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
 
 
 def _render_search_page(cloud_demo: bool) -> None:
-    _restore_latest_search()
+    active_task_id = _active_search_task_id()
+    active_task = (
+        get_background_search(active_task_id) if active_task_id else None
+    )
+    if not active_task_id:
+        _restore_latest_search()
+    task_notice = str(st.session_state.pop("search_task_notice", "")).strip()
+    if task_notice:
+        st.warning(task_notice)
     _, action_col = st.columns([12, 1])
     with action_col:
         st.button(
             "⚙️",
             key="open_management",
-            help="打开管理台",
+            help="打开管理台（后台搜索和 AI 分析不会中断）",
             on_click=_set_active_view,
             args=("management",),
         )
@@ -1607,7 +1732,13 @@ def _render_search_page(cloud_demo: bool) -> None:
             )
         with submit_col:
             run_button = st.form_submit_button(
-                "下一步：确认目标", type="primary", width="stretch"
+                "下一步：确认目标",
+                type="primary",
+                width="stretch",
+                disabled=bool(
+                    active_task
+                    and active_task.get("status") == "running"
+                ),
             )
         with st.expander("搜索设置"):
             option_cols = st.columns(2)
@@ -1695,61 +1826,30 @@ def _render_search_page(cloud_demo: bool) -> None:
         manual_english_keyword = str(
             confirmed_request.get("english_keyword", "")
         ).strip()
-        intent_fallback_reason = str(
-            search_intent.get("fallback_reason", "")
-        )
         st.session_state.fetched_search_intent = search_intent
-        live_articles: list[dict[str, Any]] = []
-        live_result_area = st.empty()
-        search_started = perf_counter()
-
-        def show_found_article(
-            article: dict[str, Any], found: int, total: int
-        ) -> None:
-            live_articles.append(article)
-            live_result_area.empty()
-            with live_result_area.container():
-                _render_article_cards(live_articles, confirmed_keyword)
-
-        with st.spinner(f"正在搜索已确认的新闻目标…"):
-            try:
-                articles = fetch_and_pre_score(
-                    industry_keyword=primary_query,
-                    max_articles=max_articles_value,
-                    article_callback=show_found_article,
-                    english_keyword=manual_english_keyword or None,
-                    additional_queries=chinese_queries,
-                    english_queries=list(
-                        search_intent.get("english_queries", []) or []
-                    ),
-                )
-            except Exception as exc:
-                logger.error("搜索失败: %s", exc, exc_info=True)
-                st.error(f"搜索失败：{exc}")
-                articles = []
-        search_seconds = perf_counter() - search_started
-
-        if articles:
-            st.session_state.fetched_articles = articles
-            st.session_state.fetched_keyword = confirmed_keyword
-            _persist_latest_search(
-                confirmed_keyword,
-                articles,
-                search_intent=search_intent,
-            )
-            st.session_state.pending_analysis = {
-                "stage": "source",
-                "keyword": confirmed_keyword,
+        task_id = start_background_search(
+            {
+                "primary_query": primary_query,
+                "confirmed_keyword": confirmed_keyword,
                 "original_query": confirmed_request.get("original_query", ""),
-                "min_score": min_score_value,
                 "max_articles": max_articles_value,
-                "search_seconds": search_seconds,
+                "min_score": min_score_value,
+                "english_keyword": manual_english_keyword,
+                "chinese_queries": chinese_queries,
+                "english_queries": list(
+                    search_intent.get("english_queries", []) or []
+                ),
                 "search_intent": search_intent,
-                "intent_fallback_reason": intent_fallback_reason,
             }
-            st.rerun()
-        else:
-            st.warning("没有找到可分析的文章。请尝试调整确认后的检索目标。")
+        )
+        st.session_state.active_search_task_id = task_id
+        st.query_params["search_task"] = task_id
+        st.rerun()
+
+    active_task_id = _active_search_task_id()
+    if active_task_id:
+        _render_active_search_task(active_task_id)
+        return
 
     if not run_button and st.session_state.get("fetched_articles"):
         articles = st.session_state.fetched_articles
@@ -1904,14 +2004,15 @@ def _render_search_page(cloud_demo: bool) -> None:
 
 
 def _render_management_page(cloud_demo: bool) -> None:
-    back_col, title_col = st.columns([1, 11])
+    back_col, title_col = st.columns([2, 10])
     with back_col:
         st.button(
-            "←",
+            "← 返回搜索",
             key="back_to_search",
-            help="返回新闻搜索",
+            help="返回新闻搜索；后台任务不会中断",
             on_click=_set_active_view,
             args=("search",),
+            width="stretch",
         )
     with title_col:
         st.markdown('<p class="main-header" style="font-size:2rem">管理台</p>', unsafe_allow_html=True)
@@ -1923,18 +2024,34 @@ def _render_management_page(cloud_demo: bool) -> None:
         "当前管理台为开放模式，无需管理员密码。任何能访问网页的人都可以审核案例和修改主题配置。",
         icon="ℹ️",
     )
+    _render_background_task_banner()
 
-    overview_tab, review_tab, topics_tab, tasks_tab = st.tabs(
-        ["📊 数据概览", "✅ 案例审核", "🎯 主题配置", "⏱️ 任务日志"]
+    database_tab, review_tab, settings_tab = st.tabs(
+        ["🗂️ 数据库管理", "✅ 人工审核", "⚙️ 系统设置"]
     )
-    with overview_tab:
+    with database_tab:
         _render_dashboard()
+        st.divider()
+        _render_news_pool()
     with review_tab:
         _render_case_library(allow_review=True)
-    with topics_tab:
-        _render_topic_management()
-    with tasks_tab:
-        _render_task_center(cloud_demo)
+    with settings_tab:
+        active_provider = get_ai_provider()
+        active_model = (
+            get_gemini_model()
+            if active_provider == "gemini"
+            else get_openai_model()
+        )
+        st.markdown('<p class="section-title">当前 AI 配置</p>', unsafe_allow_html=True)
+        config_cols = st.columns(2)
+        config_cols[0].metric("模型提供方", active_provider)
+        config_cols[1].metric("当前模型", active_model)
+        st.caption("模型和 API Key 继续通过环境变量配置，页面不会显示或保存密钥。")
+        topic_settings, task_status = st.tabs(["🎯 研究主题", "⏱️ 定时任务与日志"])
+        with topic_settings:
+            _render_topic_management()
+        with task_status:
+            _render_task_center(cloud_demo)
 
 
 cloud_demo = is_cloud_demo()
@@ -1955,9 +2072,19 @@ with st.sidebar:
         "⚙️ 管理台",
         width="stretch",
         type="primary" if st.session_state.active_view == "management" else "secondary",
+        help="查看数据库、人工审核和系统设置；后台搜索不会中断",
         on_click=_set_active_view,
         args=("management",),
     )
+    sidebar_task_id = _active_search_task_id()
+    if sidebar_task_id:
+        sidebar_task = get_background_search(sidebar_task_id)
+        if sidebar_task and sidebar_task.get("status") == "running":
+            st.caption(f"⏳ {sidebar_task.get('message', '后台搜索运行中…')}")
+        elif sidebar_task and sidebar_task.get("status") == "completed":
+            st.caption("✅ 后台搜索已完成，返回搜索页查看")
+        elif sidebar_task:
+            st.caption("⚠️ 后台搜索需要处理")
     st.divider()
     if cloud_demo:
         st.caption("Cloud 展示模式 · 数据可能随重启重置")
