@@ -54,6 +54,12 @@ from database import (
     update_topic,
 )
 from quality_scorer import NEWS_QUALITY_RULE_VERSION
+from result_table import (
+    HIGH_QUALITY_DEFAULT_THRESHOLD,
+    build_high_quality_results,
+    csv_bytes,
+    selected_export_rows,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -366,6 +372,111 @@ def _excel_bytes(df: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
+def _render_high_quality_results_table(summary: dict[str, Any]) -> None:
+    """展示本次高质量新闻，允许编辑后下载，不覆盖原始评分数据。"""
+    cases = summary.get("cases", [])
+    if not isinstance(cases, list) or not cases:
+        return
+
+    st.markdown("### 📊 本次高质量新闻数据表")
+    st.markdown(
+        '<p class="section-note">筛选达到质量门槛的新闻；可直接修改业务字段，'
+        "下载文件会使用修改后的内容。</p>",
+        unsafe_allow_html=True,
+    )
+    run_key = str(summary.get("started_at") or "latest").replace(" ", "_")
+    min_quality = st.slider(
+        "最低新闻质量",
+        min_value=0,
+        max_value=100,
+        value=HIGH_QUALITY_DEFAULT_THRESHOLD,
+        step=5,
+        key=f"high_quality_threshold_{run_key}",
+        help="默认展示 75 分及以上，即“质量良好”和“高质量”的新闻。",
+    )
+    table_df = build_high_quality_results(summary, min_quality=min_quality)
+    if table_df.empty:
+        st.info(f"本次没有新闻达到 {min_quality} 分的质量门槛。")
+        return
+
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("高质量新闻", len(table_df))
+    metric_cols[1].metric("平均质量", f"{table_df['新闻质量'].mean():.0f}/100")
+    metric_cols[2].metric("平均相关性", f"{table_df['搜索相关性'].mean():.0f}/100")
+
+    editable_columns = [
+        "导出",
+        "新闻标题",
+        "新闻摘要",
+        "研究主题",
+        "涉及企业",
+        "地区",
+        "量化案例",
+        "证据原文",
+        "指标标签",
+        "编辑备注",
+    ]
+    disabled_columns = [
+        column for column in table_df.columns if column not in editable_columns
+    ]
+    edited_df = st.data_editor(
+        table_df,
+        width="stretch",
+        hide_index=True,
+        num_rows="fixed",
+        row_height=72,
+        disabled=disabled_columns,
+        key=f"high_quality_editor_{run_key}_{min_quality}",
+        column_config={
+            "导出": st.column_config.CheckboxColumn(
+                "导出", help="取消勾选后，该行不会进入下载文件。"
+            ),
+            "原文链接": st.column_config.LinkColumn(
+                "原文链接", display_text="🔗 查看原文"
+            ),
+            "搜索相关性": st.column_config.ProgressColumn(
+                "搜索相关性", min_value=0, max_value=100, format="%d"
+            ),
+            "新闻质量": st.column_config.ProgressColumn(
+                "新闻质量", min_value=0, max_value=100, format="%d"
+            ),
+            "推荐分": st.column_config.ProgressColumn(
+                "推荐分", min_value=0, max_value=100, format="%d"
+            ),
+            "新闻标题": st.column_config.TextColumn("新闻标题", width="large"),
+            "新闻摘要": st.column_config.TextColumn("新闻摘要", width="large"),
+            "量化案例": st.column_config.TextColumn("量化案例", width="large"),
+            "证据原文": st.column_config.TextColumn("证据原文", width="large"),
+            "编辑备注": st.column_config.TextColumn("编辑备注", width="medium"),
+        },
+    )
+    export_df = selected_export_rows(edited_df)
+    st.caption(
+        "可编辑：标题、摘要、主题、企业、地区、量化案例、证据、标签和备注。"
+        "分数、来源、时间及原文链接保持只读；编辑只用于本次下载，不覆盖数据库。"
+    )
+    if export_df.empty:
+        st.warning("请至少勾选一条新闻后再下载。")
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    download_cols = st.columns(2)
+    download_cols[0].download_button(
+        "📥 下载 Excel",
+        data=_excel_bytes(export_df),
+        file_name=f"high_quality_news_{timestamp}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="stretch",
+    )
+    download_cols[1].download_button(
+        "📄 下载 CSV",
+        data=csv_bytes(export_df),
+        file_name=f"high_quality_news_{timestamp}.csv",
+        mime="text/csv",
+        width="stretch",
+    )
+
+
 def _render_run_summary(summary: dict[str, Any]) -> None:
     """展示最近一次任务的分阶段统计和逐篇诊断信息。"""
     result_cols = st.columns(5)
@@ -444,6 +555,7 @@ def _render_run_summary(summary: dict[str, Any]) -> None:
                 "原因": st.column_config.TextColumn("原因", width="large"),
             },
         )
+    _render_high_quality_results_table(summary)
 
 def _render_score_breakdown(quality_details: dict) -> None:
     """在 expander 中展示文章质量评分的各维度明细。"""

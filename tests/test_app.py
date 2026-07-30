@@ -149,7 +149,37 @@ class AppSmokeTestCase(unittest.TestCase):
                                 },
                             }
                         },
-                        "run_summary": {},
+                        "run_summary": {
+                            "started_at": "2026-07-30 08:00:00",
+                            "processed": 1,
+                            "analyzed": 1,
+                            "news_saved": 1,
+                            "saved": 1,
+                            "cases": [
+                                {
+                                    "published_at": "2026-07-30 07:00:00",
+                                    "title": "当前规则评分新闻",
+                                    "url": "https://example.com/current-news",
+                                    "source": "测试媒体",
+                                    "summary": "当前规则生成的摘要。",
+                                    "bullet_points": ["营收同比增长 20%"],
+                                    "evidence_quotes": ["营收同比增长 20%"],
+                                    "involved_companies": ["测试企业"],
+                                    "regions": ["中国"],
+                                    "metric_tags": ["营收"],
+                                    "topic_name": "AI产业",
+                                    "relevance_score": 88,
+                                    "quality_score": 82,
+                                    "quality_details": {
+                                        "adjusted_score": 82,
+                                        "label": "质量良好",
+                                        "recommendation_score": 86,
+                                    },
+                                }
+                            ],
+                            "details": [],
+                            "errors": [],
+                        },
                     }
                 )
 
@@ -164,6 +194,12 @@ class AppSmokeTestCase(unittest.TestCase):
                 self.assertTrue(
                     any(
                         "当前规则生成的摘要" in markdown.value
+                        for markdown in app.markdown
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        "本次高质量新闻数据表" in markdown.value
                         for markdown in app.markdown
                     )
                 )
