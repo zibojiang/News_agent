@@ -329,6 +329,124 @@ class AgentEvidenceTestCase(unittest.TestCase):
         request = get_client.return_value.chat.completions.create.call_args.kwargs
         self.assertNotIn("extra_body", request)
 
+    def test_article_analysis_normalizes_compatible_api_field_types(self) -> None:
+        malformed_analysis = {
+            "title": "模型返回的标题",
+            "url": "https://wrong.example.com",
+            "summary": "文章介绍中国品牌通过供应链和本地化渠道拓展海外市场。",
+            "bulletPoints": "海外门店数量增长 20%",
+            "evidenceQuotes": "海外门店数量增长 20%",
+            "involvedCompanies": "测试企业",
+            "regions": "东南亚",
+            "metricTags": "门店数量",
+            "relevanceScore": "88",
+            "sourceCredibilityScore": "21",
+            "sourceCredibilityReason": "具有明确编辑责任的主流媒体",
+            "bodyQuality": {
+                "evidenceScore": "12",
+                "completenessScore": "8",
+                "transparencyScore": "7",
+                "headlineBodyConsistencyScore": "5",
+                "balanceScore": "4",
+                "clarityScore": "5",
+                "hasSeriousUnsupportedClaims": "false",
+            },
+        }
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(malformed_analysis, ensure_ascii=False)
+                    )
+                )
+            ]
+        )
+        article_text = "测试企业海外门店数量增长 20%，并持续建设本地供应链。"
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AI_PROVIDER": "deepseek",
+                    "OPENAI_BASE_URL": "https://api.siliconflow.cn/v1",
+                },
+            ),
+            patch("agent._get_openai_client") as get_client,
+        ):
+            get_client.return_value.chat.completions.create.return_value = response
+            result = analyze_article_with_chat_completions(
+                article_title="国货品牌出海",
+                article_url="https://example.com/news/export",
+                article_text=article_text,
+                industry_keyword="中国品牌出海",
+            )
+
+        self.assertEqual(result.title, "国货品牌出海")
+        self.assertEqual(result.url, "https://example.com/news/export")
+        self.assertEqual(result.bullet_points, ["海外门店数量增长 20%"])
+        self.assertEqual(result.evidence_quotes, ["海外门店数量增长 20%"])
+        self.assertEqual(result.relevance_score, 88)
+        self.assertEqual(result.body_quality.evidence_score, 12)
+        self.assertEqual(result.body_quality.evidence_reason, "AI 未提供具体依据")
+        request = get_client.return_value.chat.completions.create.call_args.kwargs
+        self.assertIn("JSON Schema", request["messages"][0]["content"])
+
+    def test_article_analysis_retries_with_schema_feedback(self) -> None:
+        invalid_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content='{"summary":"缺少正文质量"}')
+                )
+            ]
+        )
+        analysis = NewsCaseSchema(
+            title="测试新闻",
+            url="https://example.com/news/retry",
+            summary="第二次返回完整的正文分析结果。",
+            bullet_points=[],
+            evidence_quotes=[],
+            involved_companies=["测试企业"],
+            regions=["中国"],
+            metric_tags=[],
+            relevance_score=75,
+            source_credibility_score=20,
+            source_credibility_reason="可验证的主流媒体",
+            body_quality=_body_quality(),
+        )
+        valid_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=analysis.model_dump_json())
+                )
+            ]
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "AI_PROVIDER": "deepseek",
+                    "OPENAI_BASE_URL": "https://api.siliconflow.cn/v1",
+                },
+            ),
+            patch("agent._get_openai_client") as get_client,
+            patch("agent.time.sleep"),
+        ):
+            get_client.return_value.chat.completions.create.side_effect = [
+                invalid_response,
+                valid_response,
+            ]
+            result = analyze_article_with_chat_completions(
+                article_title=analysis.title,
+                article_url=analysis.url,
+                article_text="测试企业正在推进中国品牌出海。",
+                industry_keyword="中国品牌出海",
+            )
+
+        self.assertEqual(result.summary, analysis.summary)
+        calls = get_client.return_value.chat.completions.create.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertIn("格式修正", calls[1].kwargs["messages"][1]["content"])
+        self.assertIn("body_quality", calls[1].kwargs["messages"][1]["content"])
+
     def test_source_ai_score_is_applied_before_body_analysis(self) -> None:
         article = {
             "title": "测试新闻",

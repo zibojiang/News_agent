@@ -1130,6 +1130,144 @@ def _normalize_analysis_result(
     return parsed
 
 
+def _payload_value(data: dict[str, Any], snake_key: str, camel_key: str) -> Any:
+    if snake_key in data:
+        return data[snake_key]
+    return data.get(camel_key)
+
+
+def _bounded_int(value: Any, maximum: int, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        score = int(round(float(value)))
+    except (TypeError, ValueError):
+        return default
+    return max(0, min(maximum, score))
+
+
+def _normalize_body_quality_payload(value: Any) -> dict[str, Any]:
+    """规范化兼容模型返回的正文质量对象，缺失分数按 0 分保守处理。"""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("body_quality 不是有效 JSON 对象") from exc
+    if not isinstance(value, dict):
+        raise ValueError("正文分析响应缺少 body_quality 对象")
+
+    score_fields = (
+        ("evidence_score", "evidenceScore", 15),
+        ("completeness_score", "completenessScore", 10),
+        ("transparency_score", "transparencyScore", 10),
+        (
+            "headline_body_consistency_score",
+            "headlineBodyConsistencyScore",
+            5,
+        ),
+        ("balance_score", "balanceScore", 5),
+        ("clarity_score", "clarityScore", 5),
+    )
+    if not any(
+        snake_key in value or camel_key in value
+        for snake_key, camel_key, _ in score_fields
+    ):
+        raise ValueError("body_quality 缺少六个正文质量评分字段")
+
+    normalized: dict[str, Any] = {}
+    for snake_key, camel_key, maximum in score_fields:
+        normalized[snake_key] = _bounded_int(
+            _payload_value(value, snake_key, camel_key),
+            maximum,
+        )
+        reason_key = snake_key.replace("_score", "_reason")
+        camel_reason_key = camel_key.replace("Score", "Reason")
+        normalized[reason_key] = str(
+            _payload_value(value, reason_key, camel_reason_key)
+            or "AI 未提供具体依据"
+        ).strip()
+
+    normalized["has_serious_unsupported_claims"] = _coerce_bool(
+        _payload_value(
+            value,
+            "has_serious_unsupported_claims",
+            "hasSeriousUnsupportedClaims",
+        ),
+        default=False,
+    )
+    normalized["unsupported_claims_reason"] = str(
+        _payload_value(
+            value,
+            "unsupported_claims_reason",
+            "unsupportedClaimsReason",
+        )
+        or ""
+    ).strip()
+    return normalized
+
+
+def _normalize_news_case_payload(
+    payload: dict[str, Any],
+    article_title: str,
+    article_url: str,
+) -> dict[str, Any]:
+    """修正 Chat Completions 常见字段差异，不伪造摘要或正文质量。"""
+    data = dict(payload)
+    core_keys = {"summary", "body_quality", "bodyQuality"}
+    if not core_keys.intersection(data):
+        for wrapper_key in ("news_case", "newsCase", "analysis", "result", "data"):
+            wrapped = data.get(wrapper_key)
+            if isinstance(wrapped, dict):
+                data = dict(wrapped)
+                break
+
+    summary = str(data.get("summary") or "").strip()
+    if not summary:
+        raise ValueError("正文分析响应缺少 summary")
+    body_quality = _normalize_body_quality_payload(
+        _payload_value(data, "body_quality", "bodyQuality")
+    )
+    return {
+        "title": article_title,
+        "url": article_url,
+        "summary": summary,
+        "bullet_points": _string_list(
+            _payload_value(data, "bullet_points", "bulletPoints")
+        ),
+        "evidence_quotes": _string_list(
+            _payload_value(data, "evidence_quotes", "evidenceQuotes")
+        ),
+        "involved_companies": _string_list(
+            _payload_value(data, "involved_companies", "involvedCompanies")
+        ),
+        "regions": _string_list(data.get("regions")),
+        "metric_tags": _string_list(
+            _payload_value(data, "metric_tags", "metricTags")
+        ),
+        "relevance_score": _bounded_int(
+            _payload_value(data, "relevance_score", "relevanceScore"),
+            100,
+        ),
+        "source_credibility_score": _bounded_int(
+            _payload_value(
+                data,
+                "source_credibility_score",
+                "sourceCredibilityScore",
+            ),
+            25,
+        ),
+        "source_credibility_reason": str(
+            _payload_value(
+                data,
+                "source_credibility_reason",
+                "sourceCredibilityReason",
+            )
+            or "AI 未提供具体依据"
+        ).strip(),
+        "body_quality": body_quality,
+    }
+
+
 def analyze_article_with_openai(
     article_title: str,
     article_url: str,
@@ -1228,18 +1366,19 @@ def analyze_article_with_chat_completions(
 
     client = _get_openai_client()
     model_name = model or get_openai_model()
-    system_prompt, user_prompt = _prepare_analysis_prompts(
+    system_prompt, base_user_prompt = _prepare_analysis_prompts(
         article_title,
         article_url,
         article_text,
         industry_keyword,
         topic,
     )
-    # JSON mode 硬性要求：system prompt 中必须包含 "json" 字样
-    system_prompt = system_prompt + "\nRespond with a valid JSON object."
 
     last_error = "Chat Completions API 未返回有效结果"
+    retry_instruction = ""
     for attempt in range(1, MAX_RETRIES + 1):
+        user_prompt = base_user_prompt + retry_instruction
+        retry_delay = RETRY_BASE_DELAY
         try:
             logger.info(
                 "Chat Completions 分析中 (attempt %d/%d): %s",
@@ -1247,34 +1386,21 @@ def analyze_article_with_chat_completions(
                 MAX_RETRIES,
                 article_title[:50],
             )
-            request_options: dict[str, Any] = {}
-            if _uses_official_deepseek_api(get_ai_provider()):
-                thinking_mode = os.getenv(
-                    "DEEPSEEK_THINKING", "disabled"
-                ).strip().lower()
-                if thinking_mode not in {"enabled", "disabled"}:
-                    thinking_mode = "disabled"
-                request_options["extra_body"] = {
-                    "thinking": {"type": thinking_mode}
-                }
-
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                response_format={"type": "json_object"},
-                **request_options,
+            parsed_data = _request_chat_completion_json(
+                client,
+                model_name,
+                system_prompt,
+                user_prompt,
+                get_ai_provider(),
+                response_schema=NewsCaseSchema,
             )
-            content = response.choices[0].message.content
-            if not content:
-                last_error = "Chat Completions API 返回空响应"
-                logger.warning(last_error)
-                continue
-
-            parsed_data = json.loads(content)
-            parsed = NewsCaseSchema(**parsed_data)
+            parsed = NewsCaseSchema.model_validate(
+                _normalize_news_case_payload(
+                    parsed_data,
+                    article_title,
+                    article_url,
+                )
+            )
             parsed = _normalize_analysis_result(
                 parsed, article_title, article_url, article_text
             )
@@ -1285,23 +1411,57 @@ def analyze_article_with_chat_completions(
                 article_title[:40],
             )
             return parsed
-        except (json.JSONDecodeError, ValidationError):
-            last_error = "Chat Completions API 返回 JSON 格式不符合 Schema 要求"
-            logger.error(last_error)
+        except ValidationError as exc:
+            invalid_fields = _validation_field_summary(exc)
+            last_error = f"正文分析字段格式不符合要求（字段：{invalid_fields}）"
+            retry_instruction = (
+                "\n【格式修正】上次返回未通过字段校验。"
+                f"请修正这些字段：{invalid_fields}。必须返回全部必填字段，"
+                "数组字段不得返回为对象。"
+            )
+            logger.warning(
+                "正文分析字段校验失败 (attempt %d/%d): %s",
+                attempt,
+                MAX_RETRIES,
+                invalid_fields,
+            )
+        except json.JSONDecodeError:
+            last_error = "正文分析返回的 JSON 无法解析，可能被截断"
+            retry_instruction = (
+                "\n【格式修正】上次返回的 JSON 无法解析。请缩短摘要和评分依据，"
+                "只返回一个完整 JSON 对象，不要使用 Markdown 代码块。"
+            )
+            logger.warning(
+                "正文分析 JSON 解析失败 (attempt %d/%d)",
+                attempt,
+                MAX_RETRIES,
+            )
+        except ValueError as exc:
+            last_error = str(exc)
+            retry_instruction = (
+                "\n【格式修正】上次返回缺少正文分析核心字段："
+                f"{last_error}。请严格按照 JSON Schema 补齐。"
+            )
+            logger.warning(
+                "正文分析响应无效 (attempt %d/%d): %s",
+                attempt,
+                MAX_RETRIES,
+                last_error,
+            )
         except Exception as exc:
             error_msg = str(exc).lower()
             last_error = _classify_openai_error(exc, model_name)
             is_rate_limit = any(
                 key in error_msg for key in ("429", "rate", "quota", "insufficient_quota")
             )
-            delay = (
+            retry_delay = (
                 RETRY_BASE_DELAY * (2 ** (attempt - 1))
                 if is_rate_limit
                 else RETRY_BASE_DELAY
             )
             logger.warning("%s (attempt %d/%d)", last_error, attempt, MAX_RETRIES)
-            if attempt < MAX_RETRIES:
-                time.sleep(delay)
+        if attempt < MAX_RETRIES:
+            time.sleep(retry_delay)
 
     logger.error("Chat Completions 分析最终失败: %s — %s", article_title, last_error)
     raise ArticleAnalysisError(last_error)
