@@ -206,9 +206,10 @@ class AgentEvidenceTestCase(unittest.TestCase):
 
         self.assertEqual(result.scope_level, "broad")
         self.assertTrue(result.needs_clarification)
-        self.assertGreaterEqual(len(result.interpretations), 3)
+        self.assertEqual(len(result.interpretations), 4)
         self.assertEqual(result.interpretations[1].label, "AI 应用与商业化")
         self.assertTrue(result.interpretations[1].english_queries)
+        self.assertEqual(result.interpretations[3].label, "AI 政策与治理")
 
     def test_merges_multiple_selected_search_interpretations(self) -> None:
         intent = {

@@ -1578,47 +1578,68 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
 
         interpretations = intent.get("interpretations", [])
         selected_indexes: list[int] = []
-        option_labels: dict[int, str] = {}
+        available_options: list[tuple[int, dict[str, Any]]] = []
         if isinstance(interpretations, list) and interpretations:
             question = str(
                 intent.get("clarification_question")
                 or "请选择一个或多个希望检索的细分方向。"
             )
             st.markdown(f"**{question}**")
-            option_labels = {
-                index: (
-                    f"{item.get('label', '选项')} — "
-                    f"{item.get('description', '')}"
-                )
+            available_options = [
+                (index, item)
                 for index, item in enumerate(interpretations)
                 if isinstance(item, dict)
-            }
+            ][:4]
             try:
                 recommended = int(
                     intent.get("recommended_interpretation_index", 0) or 0
                 )
             except (TypeError, ValueError):
                 recommended = 0
-            if recommended not in option_labels:
-                recommended = next(iter(option_labels), 0)
-            selected_indexes = st.multiselect(
-                "选择一个或多个检索方向",
-                options=list(option_labels),
-                default=[recommended] if option_labels else [],
-                format_func=lambda index: option_labels[index],
-                key=f"intent_choices_{revision}",
-            )
-            st.caption("可以多选；每个方向会保留自己的中英文检索词和相关性标准。")
+            available_indexes = {index for index, _ in available_options}
+            if recommended not in available_indexes and available_options:
+                recommended = available_options[0][0]
+            for row_start in range(0, len(available_options), 2):
+                option_columns = st.columns(2)
+                for offset, (index, item) in enumerate(
+                    available_options[row_start : row_start + 2]
+                ):
+                    position = row_start + offset
+                    with option_columns[offset]:
+                        selected = st.checkbox(
+                            str(item.get("label") or f"方向 {position + 1}"),
+                            value=index == recommended,
+                            help=str(item.get("description") or ""),
+                            key=f"intent_option_{revision}_{index}",
+                        )
+                        description = str(item.get("description") or "").strip()
+                        if description:
+                            st.caption(description)
+                        if selected:
+                            selected_indexes.append(index)
+            st.caption("以上方向可单选或多选。")
         elif intent.get("clarification_question"):
             st.markdown(f"**{intent['clarification_question']}**")
 
-        selected_count = max(1, len(selected_indexes))
+        custom_intent = st.text_area(
+            "或者，直接输入你真正想搜索的内容",
+            placeholder=(
+                "例如：我想搜索中国企业在海外销售的产品，"
+                "以及国内供应链如何支持这些产品研发。"
+            ),
+            key=f"intent_custom_{revision}",
+        )
+        custom_query = custom_intent.strip()
+        if custom_query:
+            st.caption("将以你输入的内容为准，直接生成检索词并开始搜索。")
+
+        selected_count = 1 if custom_query else max(1, len(selected_indexes))
         articles_per_intent = int(review.get("max_articles", 8))
         planned_articles = calculate_multi_intent_article_limit(
             articles_per_intent,
             selected_count,
         )
-        if selected_count > 1:
+        if not custom_query and selected_count > 1:
             uncapped_articles = articles_per_intent * selected_count
             quantity_text = (
                 f"已选择 {selected_count} 个方向：按每方向 "
@@ -1633,33 +1654,50 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
                 "不保证每个方向最终都正好返回相同数量。"
             )
 
-        custom_intent = st.text_area(
-            "如果不是这个意思，请告诉我您真正想查的内容",
-            placeholder=(
-                "例如：我想搜索中国企业在海外销售的产品，"
-                "以及国内供应链如何支持这些产品研发。"
-            ),
-            key=f"intent_custom_{revision}",
-        )
-        confirm_col, revise_col = st.columns(2)
-        confirm_clicked = confirm_col.button(
-            "✓ 是的，确认并开始搜索",
+        confirm_clicked = st.button(
+            "✓ 确认并开始搜索",
             type="primary",
             width="stretch",
             key=f"confirm_intent_{revision}",
-            disabled=bool(option_labels) and not selected_indexes,
-        )
-        revise_clicked = revise_col.button(
-            "按我的说明重新理解",
-            width="stretch",
-            disabled=not custom_intent.strip(),
-            key=f"revise_intent_{revision}",
+            disabled=(
+                bool(available_options)
+                and not selected_indexes
+                and not custom_query
+            ),
         )
 
     if confirm_clicked:
-        confirmed = _confirmed_intent_from_review(intent, selected_indexes)
-        confirmed["used_fallback"] = bool(review.get("fallback_reason"))
-        confirmed["fallback_reason"] = str(review.get("fallback_reason", ""))
+        request_query = str(review.get("original_query", ""))
+        fallback_reason = str(review.get("fallback_reason", ""))
+        intent_to_confirm = intent
+        indexes_to_confirm: list[int] | None = selected_indexes
+        if custom_query:
+            request_query = custom_query
+            try:
+                with st.spinner("AI 正在生成检索词…"):
+                    custom_model = analyze_search_intent(custom_query)
+                fallback_reason = ""
+            except Exception as exc:
+                logger.warning("AI 理解自定义搜索内容失败: %s", exc)
+                custom_model = fallback_search_intent(
+                    custom_query,
+                    english_query=(
+                        str(review.get("english_keyword", "")) or None
+                    ),
+                )
+                fallback_reason = str(exc)
+            intent_to_confirm = custom_model.model_dump()
+            intent_to_confirm["interpretations"] = []
+            intent_to_confirm["needs_clarification"] = False
+            intent_to_confirm["clarification_question"] = ""
+            indexes_to_confirm = None
+
+        confirmed = _confirmed_intent_from_review(
+            intent_to_confirm,
+            indexes_to_confirm,
+        )
+        confirmed["used_fallback"] = bool(fallback_reason)
+        confirmed["fallback_reason"] = fallback_reason
         selected_count = int(confirmed.get("selected_intent_count", 1) or 1)
         articles_per_intent = int(review.get("max_articles", 8))
         planned_articles = calculate_multi_intent_article_limit(
@@ -1667,7 +1705,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
             selected_count,
         )
         st.session_state.confirmed_search_request = {
-            "original_query": review.get("original_query", ""),
+            "original_query": request_query,
             "intent": confirmed,
             "max_articles": planned_articles,
             "articles_per_intent": articles_per_intent,
@@ -1676,29 +1714,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
             "english_keyword": str(review.get("english_keyword", "")),
         }
         st.session_state.pop("search_intent_review", None)
-        st.rerun()
-
-    if revise_clicked:
-        revised_query = custom_intent.strip()
-        try:
-            with st.spinner("AI 正在按您的说明重新理解…"):
-                revised_model = analyze_search_intent(revised_query)
-            fallback_reason = ""
-        except Exception as exc:
-            logger.warning("AI 重新理解搜索意图失败: %s", exc)
-            revised_model = fallback_search_intent(
-                revised_query,
-                english_query=str(review.get("english_keyword", "")) or None,
-            )
-            fallback_reason = str(exc)
-        st.session_state.search_intent_review = {
-            **review,
-            "original_query": revised_query,
-            "intent": revised_model.model_dump(),
-            "fallback_reason": fallback_reason,
-            "revision": revision + 1,
-        }
-        st.session_state.last_search_keyword = revised_query
+        st.session_state.last_search_keyword = request_query
         st.rerun()
 
 

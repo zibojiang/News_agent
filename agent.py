@@ -122,7 +122,7 @@ class SearchIntentSchema(BaseModel):
     )
     interpretations: list[SearchInterpretationSchema] = Field(
         default_factory=list,
-        description="宽泛或歧义查询的 2-4 个可多选细分方向",
+        description="宽泛或歧义查询的 4 个可单选或多选的细分方向",
     )
     recommended_interpretation_index: int = Field(
         default=0,
@@ -482,7 +482,7 @@ SEARCH_INTENT_SYSTEM_PROMPT = """你是一名新闻检索策略师。
    - focused：有主题和方向，但仍可能存在语义歧义。
    - specific：对象、范围或想了解的问题已经清晰。
 2. 若范围过大或存在歧义，needs_clarification 必须为 true，只提出一个简洁问题，
-   并返回 2-4 个边界清晰、尽量不重复、可独立选择的 interpretations。
+   并固定返回 4 个边界清晰、尽量不重复、可独立选择的 interpretations。
    每个解释都必须自带最终搜索目标、中英文检索词和相关性判断标准，
    便于用户选择一个或多个方向后直接搜索。
 3. 若意图清晰，needs_clarification 为 false、interpretations 为空，但仍返回一句可供用户确认的 intent_summary。
@@ -537,6 +537,15 @@ def fallback_search_intent(
                 chinese_queries=["大模型 AI 芯片 算力 最新动态"],
                 english_queries=["foundation models AI chips compute infrastructure"],
                 relevance_criteria=["新闻核心讨论模型、算力或 AI 基础设施"],
+            ),
+            SearchInterpretationSchema(
+                label="AI 政策与治理",
+                description="关注监管政策、行业标准、安全、伦理和治理机制",
+                intent_summary="查找 AI 监管政策、行业标准、安全伦理和治理机制的最新动态",
+                target_topics=["AI 监管", "行业标准", "AI 治理"],
+                chinese_queries=["AI 监管 政策 标准 治理 最新动态"],
+                english_queries=["AI regulation policy standards governance"],
+                relevance_criteria=["新闻核心讨论 AI 监管、标准、安全或治理机制"],
             ),
         ]
         scope_level: Literal["broad", "focused", "specific"] = "broad"

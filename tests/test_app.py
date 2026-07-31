@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
 
-from agent import SEARCH_RELEVANCE_RULE_VERSION
+from agent import SEARCH_RELEVANCE_RULE_VERSION, fallback_search_intent
 from database import load_last_search_state, save_last_search_state
 from quality_scorer import NEWS_QUALITY_RULE_VERSION
 
@@ -344,6 +344,24 @@ class AppSmokeTestCase(unittest.TestCase):
                                 "english_queries": ["AI applications commercialization"],
                                 "relevance_criteria": ["新闻提供具体 AI 应用"],
                             },
+                            {
+                                "label": "AI 基础设施",
+                                "description": "关注模型、芯片和算力",
+                                "intent_summary": "了解 AI 基础设施",
+                                "target_topics": ["AI 基础设施"],
+                                "chinese_queries": ["AI 芯片 算力"],
+                                "english_queries": ["AI chips compute"],
+                                "relevance_criteria": ["新闻讨论 AI 基础设施"],
+                            },
+                            {
+                                "label": "AI 政策治理",
+                                "description": "关注政策、标准和治理",
+                                "intent_summary": "了解 AI 政策与治理",
+                                "target_topics": ["AI 治理"],
+                                "chinese_queries": ["AI 政策 治理"],
+                                "english_queries": ["AI policy governance"],
+                                "relevance_criteria": ["新闻讨论 AI 政策或治理"],
+                            },
                         ],
                         "recommended_interpretation_index": 0,
                     },
@@ -362,27 +380,28 @@ class AppSmokeTestCase(unittest.TestCase):
                 )
                 self.assertTrue(
                     any(
-                        button.label == "✓ 是的，确认并开始搜索"
+                        button.label == "✓ 确认并开始搜索"
                         for button in app.button
                     )
                 )
-                multiselect_labels = [
-                    multiselect.label for multiselect in app.multiselect
-                ]
-                self.assertIn(
-                    "选择一个或多个检索方向",
-                    multiselect_labels,
+                checkbox_labels = [checkbox.label for checkbox in app.checkbox]
+                self.assertEqual(
+                    checkbox_labels,
+                    ["广义 AI", "AI 应用", "AI 基础设施", "AI 政策治理"],
                 )
-                self.assertNotIn(
-                    "选择检索方向",
-                    [radio.label for radio in app.radio],
+                self.assertEqual(list(app.multiselect), [])
+                self.assertFalse(
+                    any(
+                        button.label == "按我的说明重新理解"
+                        for button in app.button
+                    )
                 )
-                intent_selector = next(
-                    multiselect
-                    for multiselect in app.multiselect
-                    if multiselect.label == "选择一个或多个检索方向"
+                ai_application_option = next(
+                    checkbox
+                    for checkbox in app.checkbox
+                    if checkbox.label == "AI 应用"
                 )
-                intent_selector.select(1).run(timeout=20)
+                ai_application_option.check().run(timeout=20)
                 self.assertTrue(
                     any(
                         "本次最多处理 16 篇" in info.value
@@ -392,7 +411,7 @@ class AppSmokeTestCase(unittest.TestCase):
                 confirm_button = next(
                     button
                     for button in app.button
-                    if button.label == "✓ 是的，确认并开始搜索"
+                    if button.label == "✓ 确认并开始搜索"
                 )
                 with patch(
                     "agent.fetch_and_pre_score", return_value=[]
@@ -543,6 +562,84 @@ class AppSmokeTestCase(unittest.TestCase):
                 self.assertIn("⚙️ 系统设置", tab_labels)
                 self.assertTrue(
                     any("当前 AI 配置" in markdown.value for markdown in app.markdown)
+                )
+
+    def test_custom_intent_starts_search_without_second_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = str(Path(temp_dir) / "industry_news.db")
+            custom_query = "中国企业海外产品与国内供应链研发"
+            with patch.dict(
+                os.environ,
+                {
+                    "DATABASE_PATH": database_path,
+                    "DEPLOYMENT_MODE": "cloud_demo",
+                    "ADMIN_PASSWORD": "",
+                },
+            ):
+                app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+                app.session_state["search_intent_review"] = {
+                    "original_query": "海外产品供应链",
+                    "intent": {
+                        "intent_summary": "了解海外产品与供应链",
+                        "target_topics": ["海外产品", "供应链"],
+                        "chinese_queries": ["海外产品 供应链"],
+                        "english_queries": ["overseas products supply chain"],
+                        "relevance_criteria": ["新闻讨论海外产品与供应链"],
+                        "scope_level": "focused",
+                        "needs_clarification": True,
+                        "clarification_question": "请选择方向或自行输入。",
+                        "interpretations": [
+                            {
+                                "label": "海外品牌在华供应链",
+                                "description": "海外品牌使用中国供应链",
+                                "intent_summary": "了解海外品牌在华供应链",
+                                "target_topics": ["海外品牌", "中国供应链"],
+                                "chinese_queries": ["海外品牌 中国供应链"],
+                                "english_queries": ["foreign brands China supply chain"],
+                                "relevance_criteria": ["新闻讨论海外品牌"],
+                            }
+                        ],
+                        "recommended_interpretation_index": 0,
+                    },
+                    "fallback_reason": "",
+                    "max_articles": 8,
+                    "min_score": 70,
+                    "english_keyword": "",
+                    "revision": 0,
+                }
+                app.run(timeout=20)
+                custom_input = next(
+                    item
+                    for item in app.text_area
+                    if item.label == "或者，直接输入你真正想搜索的内容"
+                )
+                custom_input.input(custom_query).run(timeout=20)
+                confirm_button = next(
+                    button
+                    for button in app.button
+                    if button.label == "✓ 确认并开始搜索"
+                )
+                custom_model = fallback_search_intent(custom_query)
+                with (
+                    patch(
+                        "agent.analyze_search_intent",
+                        return_value=custom_model,
+                    ) as analyze_intent,
+                    patch("agent.fetch_and_pre_score", return_value=[]) as fetch_news,
+                ):
+                    confirm_button.click().run(timeout=20)
+
+                self.assertEqual(list(app.exception), [])
+                analyze_intent.assert_called_once_with(custom_query)
+                fetch_news.assert_called_once()
+                self.assertEqual(
+                    fetch_news.call_args.kwargs["industry_keyword"],
+                    custom_query,
+                )
+                self.assertEqual(fetch_news.call_args.kwargs["max_articles"], 8)
+                self.assertEqual(
+                    fetch_news.call_args.kwargs["additional_queries"],
+                    [custom_query],
                 )
 
 
