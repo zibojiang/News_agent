@@ -366,8 +366,29 @@ class AppSmokeTestCase(unittest.TestCase):
                         for button in app.button
                     )
                 )
-                st_radio_labels = [radio.label for radio in app.radio]
-                self.assertIn("选择检索方向", st_radio_labels)
+                multiselect_labels = [
+                    multiselect.label for multiselect in app.multiselect
+                ]
+                self.assertIn(
+                    "选择一个或多个检索方向",
+                    multiselect_labels,
+                )
+                self.assertNotIn(
+                    "选择检索方向",
+                    [radio.label for radio in app.radio],
+                )
+                intent_selector = next(
+                    multiselect
+                    for multiselect in app.multiselect
+                    if multiselect.label == "选择一个或多个检索方向"
+                )
+                intent_selector.select(1).run(timeout=20)
+                self.assertTrue(
+                    any(
+                        "本次最多处理 16 篇" in info.value
+                        for info in app.info
+                    )
+                )
                 confirm_button = next(
                     button
                     for button in app.button
@@ -382,6 +403,14 @@ class AppSmokeTestCase(unittest.TestCase):
                 self.assertEqual(
                     fetch_news.call_args.kwargs["industry_keyword"],
                     "AI 行业 新闻",
+                )
+                self.assertEqual(
+                    fetch_news.call_args.kwargs["max_articles"],
+                    16,
+                )
+                self.assertEqual(
+                    fetch_news.call_args.kwargs["additional_queries"],
+                    ["AI 行业 新闻", "AI 应用 商业化"],
                 )
 
                 app.session_state["fetched_articles"] = [

@@ -14,16 +14,19 @@ from agent import (
     SEARCH_RELEVANCE_RULE_VERSION,
     SearchIntentSchema,
     SourceCredibilitySchema,
+    _build_source_credibility_prompt,
     _keep_verifiable_evidence,
     analyze_article,
     analyze_article_with_chat_completions,
     analyze_search_intent,
+    calculate_multi_intent_article_limit,
     calculate_recommendation_score,
     fallback_search_intent,
     get_ai_analysis_workers,
     get_ai_provider,
     get_gemini_model,
     get_openai_model,
+    merge_search_interpretations,
     run_pipeline,
     score_sources_with_ai,
 )
@@ -206,6 +209,64 @@ class AgentEvidenceTestCase(unittest.TestCase):
         self.assertGreaterEqual(len(result.interpretations), 3)
         self.assertEqual(result.interpretations[1].label, "AI 应用与商业化")
         self.assertTrue(result.interpretations[1].english_queries)
+
+    def test_merges_multiple_selected_search_interpretations(self) -> None:
+        intent = {
+            "intent_summary": "了解 AI",
+            "interpretations": [
+                {
+                    "label": "AI 应用",
+                    "description": "行业应用与商业化",
+                    "intent_summary": "了解 AI 应用与商业化案例",
+                    "target_topics": ["AI 应用", "商业化"],
+                    "chinese_queries": ["AI 应用 案例", "AI 商业化"],
+                    "english_queries": ["AI applications"],
+                    "relevance_criteria": ["新闻提供具体应用案例"],
+                },
+                {
+                    "label": "AI 基础设施",
+                    "description": "芯片、算力和数据中心",
+                    "intent_summary": "了解 AI 芯片与算力基础设施",
+                    "target_topics": ["AI 芯片", "算力"],
+                    "chinese_queries": ["AI 芯片 算力"],
+                    "english_queries": ["AI chips compute", "AI data centers"],
+                    "relevance_criteria": ["新闻核心讨论芯片或算力"],
+                },
+            ],
+            "recommended_interpretation_index": 0,
+        }
+
+        result = merge_search_interpretations(intent, [0, 1])
+
+        self.assertEqual(result["selected_intent_count"], 2)
+        self.assertEqual(
+            result["selected_intent_labels"],
+            ["AI 应用", "AI 基础设施"],
+        )
+        self.assertEqual(
+            result["chinese_queries"],
+            ["AI 应用 案例", "AI 芯片 算力", "AI 商业化"],
+        )
+        self.assertEqual(
+            result["english_queries"],
+            ["AI applications", "AI chips compute", "AI data centers"],
+        )
+        self.assertIn("AI 应用：新闻提供具体应用案例", result["relevance_criteria"])
+        self.assertIn("AI 基础设施：新闻核心讨论芯片或算力", result["relevance_criteria"])
+
+        prompt = _build_source_credibility_prompt(
+            {"title": "测试", "url": "https://example.com", "content": "正文"},
+            original_query="AI",
+            search_intent=result,
+        )
+        self.assertIn("已确认的细分意图（命中任一即可）", prompt)
+        self.assertIn("AI 应用：了解 AI 应用与商业化案例", prompt)
+        self.assertIn("AI 基础设施：了解 AI 芯片与算力基础设施", prompt)
+
+    def test_multi_intent_article_limit_expands_and_caps_total(self) -> None:
+        self.assertEqual(calculate_multi_intent_article_limit(8, 1), 8)
+        self.assertEqual(calculate_multi_intent_article_limit(8, 3), 24)
+        self.assertEqual(calculate_multi_intent_article_limit(20, 4), 40)
 
     def test_custom_openai_endpoint_uses_chat_completions_for_intent(self) -> None:
         intent = SearchIntentSchema(

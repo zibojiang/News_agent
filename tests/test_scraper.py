@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from concurrent.futures import Future
 from unittest.mock import patch
+from urllib.parse import quote_plus
 
 from scraper import fetch_and_extract_batch, fetch_latest_news
 
@@ -69,6 +70,48 @@ class ScraperBatchTestCase(unittest.TestCase):
                 for url in requested_urls
             )
         )
+
+    def test_searches_up_to_four_selected_intent_queries_per_language(self) -> None:
+        requested_urls = []
+
+        def fetch_source(url: str, _limit: int, source_name: str):
+            requested_urls.append(url)
+            return [
+                {
+                    "title": f"{source_name} 新闻",
+                    "url": f"https://example.com/{len(requested_urls)}",
+                    "source": source_name,
+                }
+            ]
+
+        with patch("scraper._fetch_rss_news", side_effect=fetch_source):
+            fetch_latest_news(
+                "中文方向一",
+                max_articles=9,
+                english_query="English direction one",
+                additional_queries=["中文方向二", "中文方向三", "中文方向四"],
+                english_queries=[
+                    "English direction two",
+                    "English direction three",
+                    "English direction four",
+                    "English manual supplement",
+                ],
+            )
+
+        self.assertEqual(len(requested_urls), 9)
+        for query in (
+            "中文方向一",
+            "中文方向二",
+            "中文方向三",
+            "中文方向四",
+            "English direction one",
+            "English direction two",
+            "English direction three",
+            "English direction four",
+            "English manual supplement",
+        ):
+            encoded = quote_plus(query)
+            self.assertTrue(any(f"q={encoded}" in url for url in requested_urls))
 
     def test_resolves_each_candidate_once_inside_parallel_extraction(self) -> None:
         item = {

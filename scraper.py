@@ -307,12 +307,12 @@ def fetch_latest_news(
 
     chinese_searches = unique_queries(
         [query, *(additional_queries or [])],
-        limit=3,
+        limit=4,
     )
     english_candidates = [english_query or "", *(english_queries or [])]
     if re.search(r"[A-Za-z]", query):
         english_candidates.append(query)
-    english_searches = unique_queries(english_candidates, limit=2)
+    english_searches = unique_queries(english_candidates, limit=5)
     encoded_query = quote_plus(query)
     logger.info("开始抓取真实新闻列表，关键词: %s", query)
 

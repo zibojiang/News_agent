@@ -78,6 +78,7 @@ BODY_ANALYSIS_RELEVANCE_THRESHOLD = 60
 SEARCH_RELEVANCE_RULE_VERSION = "r2"
 RECOMMENDATION_RELEVANCE_WEIGHT = 0.7
 RECOMMENDATION_QUALITY_WEIGHT = 0.3
+MAX_MULTI_INTENT_ARTICLES = 40
 
 SEARCH_RELEVANCE_DIMENSION_MAXIMA = {
     "core_topic_match": 40,
@@ -88,9 +89,9 @@ SEARCH_RELEVANCE_DIMENSION_MAXIMA = {
 
 
 class SearchInterpretationSchema(BaseModel):
-    """宽泛或歧义查询的一个可确认解释。"""
+    """宽泛或歧义查询的一个可多选细分方向。"""
 
-    label: str = Field(description="供用户选择的简短标题")
+    label: str = Field(description="供用户多选的简短标题")
     description: str = Field(description="说明该解释的范围和关注点")
     intent_summary: str = Field(description="选中后可直接使用的最终搜索目标")
     target_topics: list[str] = Field(description="该解释的核心主题")
@@ -121,7 +122,7 @@ class SearchIntentSchema(BaseModel):
     )
     interpretations: list[SearchInterpretationSchema] = Field(
         default_factory=list,
-        description="宽泛或歧义查询的 2-4 个可选解释",
+        description="宽泛或歧义查询的 2-4 个可多选细分方向",
     )
     recommended_interpretation_index: int = Field(
         default=0,
@@ -481,8 +482,9 @@ SEARCH_INTENT_SYSTEM_PROMPT = """你是一名新闻检索策略师。
    - focused：有主题和方向，但仍可能存在语义歧义。
    - specific：对象、范围或想了解的问题已经清晰。
 2. 若范围过大或存在歧义，needs_clarification 必须为 true，只提出一个简洁问题，
-   并返回 2-4 个互斥、可操作的 interpretations。每个解释都必须自带最终搜索目标、
-   中英文检索词和相关性判断标准，便于用户选中后直接搜索。
+   并返回 2-4 个边界清晰、尽量不重复、可独立选择的 interpretations。
+   每个解释都必须自带最终搜索目标、中英文检索词和相关性判断标准，
+   便于用户选择一个或多个方向后直接搜索。
 3. 若意图清晰，needs_clarification 为 false、interpretations 为空，但仍返回一句可供用户确认的 intent_summary。
 
 保留用户的核心主题，可补充“新趋势、技术路线、市场、政策、产业化”等
@@ -538,7 +540,7 @@ def fallback_search_intent(
             ),
         ]
         scope_level: Literal["broad", "focused", "specific"] = "broad"
-        clarification_question = "“AI”范围较广，您想检索广义 AI 新闻，还是某个具体方向？"
+        clarification_question = "“AI”范围较广，请选择一个或多个希望检索的细分方向。"
     elif len(topic_parts) >= 2:
         scope_level = "focused"
         clarification_question = (
@@ -640,6 +642,166 @@ def _string_list(value: Any) -> list[str]:
         return []
     values = value if isinstance(value, list) else [value]
     return [item.strip() for item in values if isinstance(item, str) and item.strip()]
+
+
+def calculate_multi_intent_article_limit(
+    articles_per_intent: int,
+    selected_intent_count: int,
+) -> int:
+    """按已选细分意图扩展文章数，并限制单次手动搜索的最大规模。"""
+    per_intent = max(1, int(articles_per_intent))
+    intent_count = max(1, int(selected_intent_count))
+    return min(MAX_MULTI_INTENT_ARTICLES, per_intent * intent_count)
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = str(value).strip()
+        key = cleaned.casefold()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
+
+
+def _round_robin_strings(groups: list[list[str]]) -> list[str]:
+    """交错合并各细分意图的检索词，避免第一个方向占满搜索额度。"""
+    result: list[str] = []
+    max_length = max((len(group) for group in groups), default=0)
+    for position in range(max_length):
+        for group in groups:
+            if position < len(group):
+                result.append(group[position])
+    return _unique_strings(result)
+
+
+def merge_search_interpretations(
+    intent: dict[str, Any],
+    selected_indexes: int | list[int] | tuple[int, ...] | None = None,
+) -> dict[str, Any]:
+    """将用户选择的一个或多个细分方向合并成最终检索意图。"""
+    interpretations = intent.get("interpretations", [])
+    available = (
+        [
+            (index, item)
+            for index, item in enumerate(interpretations)
+            if isinstance(item, dict)
+        ]
+        if isinstance(interpretations, list)
+        else []
+    )
+    if not available:
+        confirmed = dict(intent)
+        confirmed["selected_intents"] = []
+        selected_count = 1
+    else:
+        try:
+            recommended = int(
+                intent.get("recommended_interpretation_index", 0) or 0
+            )
+        except (TypeError, ValueError):
+            recommended = 0
+        if isinstance(selected_indexes, int):
+            requested_indexes = [selected_indexes]
+        elif isinstance(selected_indexes, (list, tuple)):
+            requested_indexes = [
+                int(index)
+                for index in selected_indexes
+                if isinstance(index, int) and not isinstance(index, bool)
+            ]
+        else:
+            requested_indexes = [recommended]
+        requested_set = set(requested_indexes)
+        selected = [
+            item for index, item in available if index in requested_set
+        ]
+        if not selected and available:
+            fallback = next(
+                (
+                    item
+                    for index, item in available
+                    if index == recommended
+                ),
+                available[0][1],
+            )
+            selected = [fallback]
+
+        selected_intents = [
+            {
+                "label": str(item.get("label") or "检索方向").strip(),
+                "description": str(item.get("description") or "").strip(),
+                "intent_summary": str(
+                    item.get("intent_summary") or item.get("label") or ""
+                ).strip(),
+                "target_topics": _string_list(item.get("target_topics")),
+                "chinese_queries": _string_list(item.get("chinese_queries")),
+                "english_queries": _string_list(item.get("english_queries")),
+                "relevance_criteria": _string_list(
+                    item.get("relevance_criteria")
+                ),
+            }
+            for item in selected
+        ]
+        summaries = [
+            item["intent_summary"]
+            for item in selected_intents
+            if item["intent_summary"]
+        ]
+        labels = [
+            item["label"] for item in selected_intents if item["label"]
+        ]
+        selected_count = max(1, len(selected_intents))
+        chinese_queries = _round_robin_strings(
+            [item["chinese_queries"] for item in selected_intents]
+        ) or _string_list(intent.get("chinese_queries"))
+        english_queries = _round_robin_strings(
+            [item["english_queries"] for item in selected_intents]
+        ) or _string_list(intent.get("english_queries"))
+        confirmed = {
+            "intent_summary": (
+                summaries[0]
+                if len(summaries) == 1
+                else (
+                    "同时检索以下细分方向：" + "；".join(summaries)
+                    if summaries
+                    else str(intent.get("intent_summary") or "").strip()
+                )
+            ),
+            "target_topics": _unique_strings(
+                [
+                    topic
+                    for item in selected_intents
+                    for topic in item["target_topics"]
+                ]
+            ),
+            "chinese_queries": chinese_queries,
+            "english_queries": english_queries,
+            "relevance_criteria": _unique_strings(
+                [
+                    f"{item['label']}：{criterion}"
+                    for item in selected_intents
+                    for criterion in item["relevance_criteria"]
+                ]
+            ),
+            "selected_intents": selected_intents,
+            "selected_intent_labels": labels,
+        }
+
+    confirmed.update(
+        {
+            "selected_intent_count": selected_count,
+            "scope_level": "specific",
+            "needs_clarification": False,
+            "clarification_question": "",
+            "interpretations": [],
+            "recommended_interpretation_index": 0,
+            "confirmed_by_user": True,
+        }
+    )
+    return confirmed
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -896,6 +1058,8 @@ SOURCE_CREDIBILITY_SYSTEM_PROMPT = """你是一名新闻搜索初筛审查员。
 
 你需要独立完成两项评分：
 1. 搜索相关性（0-100）：不要直接给总分，分别评估四个维度，总分由程序汇总。
+   如果用户确认了多个细分意图，新闻实质命中其中任意一个方向即可视为相关，
+   不要求一篇新闻同时覆盖所有方向；relevance_reason 应说明具体命中了哪个方向。
    - core_topic_match_score（0-40）：新闻核心主体是否就是用户搜索的行业、企业、事件或技术。
    - information_need_match_score（0-30）：是否回答用户具体想了解的“新方向、市场、政策、案例”等问题。
    - semantic_coverage_score（0-20）：正文是否实质讨论相关内容，不能因为只出现一两个相同词就给高分。
@@ -930,9 +1094,27 @@ def _build_source_credibility_prompt(
         intent_data = search_intent
     else:
         intent_data = fallback_search_intent(original_query or "当前搜索").model_dump()
+    selected_intents = [
+        item
+        for item in intent_data.get("selected_intents", [])
+        if isinstance(item, dict)
+    ]
+    selected_intent_text = "\n".join(
+        (
+            f"- {item.get('label', '检索方向')}："
+            f"{item.get('intent_summary', '')}"
+        )
+        for item in selected_intents
+    )
+    selected_intent_section = (
+        "【已确认的细分意图（命中任一即可）】\n"
+        f"{selected_intent_text}\n"
+        if selected_intent_text
+        else ""
+    )
     return f"""【用户原始搜索】{original_query}
 【AI 理解的搜索意图】{intent_data.get('intent_summary', '')}
-【目标主题】{' / '.join(intent_data.get('target_topics', []) or [])}
+{selected_intent_section}【目标主题】{' / '.join(intent_data.get('target_topics', []) or [])}
 【相关性判断标准】{' / '.join(intent_data.get('relevance_criteria', []) or [])}
 
 【来源名称】{article.get('source', '未知来源')}

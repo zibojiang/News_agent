@@ -31,12 +31,14 @@ from agent import (
     SEARCH_RELEVANCE_DISPLAY_THRESHOLD,
     SEARCH_RELEVANCE_RULE_VERSION,
     analyze_search_intent,
+    calculate_multi_intent_article_limit,
     calculate_recommendation_score,
     fallback_search_intent,
     fetch_and_pre_score,
     get_ai_provider,
     get_gemini_model,
     get_openai_model,
+    merge_search_interpretations,
     run_pipeline,
     score_sources_with_ai,
 )
@@ -942,10 +944,19 @@ def _render_article_cards(
                 st.caption(f"降级原因：{fallback_reason}")
         st.info(f"🧠 AI 理解的搜索目标：{intent['intent_summary']}")
         with st.expander("查看本次中英文检索策略"):
+            selected_intents = intent.get("selected_intents", []) or []
             target_topics = intent.get("target_topics", []) or []
             chinese_queries = intent.get("chinese_queries", []) or []
             english_queries = intent.get("english_queries", []) or []
             relevance_criteria = intent.get("relevance_criteria", []) or []
+            if selected_intents:
+                st.markdown("**已选择的细分意图：**")
+                for selected_intent in selected_intents:
+                    if isinstance(selected_intent, dict):
+                        st.markdown(
+                            f"- {selected_intent.get('label', '检索方向')}："
+                            f"{selected_intent.get('intent_summary', '')}"
+                        )
             if target_topics:
                 st.markdown("**目标主题：**" + " · ".join(map(str, target_topics)))
             if chinese_queries:
@@ -1534,42 +1545,10 @@ def _render_task_center(cloud_demo: bool) -> None:
 
 def _confirmed_intent_from_review(
     intent: dict[str, Any],
-    selected_index: int = 0,
+    selected_indexes: int | list[int] | tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
-    """将用户选中的解释转换为可直接搜索的最终意图。"""
-    interpretations = intent.get("interpretations", [])
-    if isinstance(interpretations, list) and interpretations:
-        index = max(0, min(int(selected_index), len(interpretations) - 1))
-        selected = interpretations[index]
-        if isinstance(selected, dict):
-            confirmed = {
-                "intent_summary": str(selected.get("intent_summary", "")),
-                "target_topics": list(selected.get("target_topics", []) or []),
-                "chinese_queries": list(
-                    selected.get("chinese_queries", []) or []
-                ),
-                "english_queries": list(
-                    selected.get("english_queries", []) or []
-                ),
-                "relevance_criteria": list(
-                    selected.get("relevance_criteria", []) or []
-                ),
-            }
-        else:
-            confirmed = dict(intent)
-    else:
-        confirmed = dict(intent)
-    confirmed.update(
-        {
-            "scope_level": "specific",
-            "needs_clarification": False,
-            "clarification_question": "",
-            "interpretations": [],
-            "recommended_interpretation_index": 0,
-            "confirmed_by_user": True,
-        }
-    )
-    return confirmed
+    """将用户多选的细分方向合并为可直接搜索的最终意图。"""
+    return merge_search_interpretations(intent, selected_indexes)
 
 
 def _render_search_intent_review(review: dict[str, Any]) -> None:
@@ -1598,31 +1577,61 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
         )
 
         interpretations = intent.get("interpretations", [])
-        selected_index = 0
+        selected_indexes: list[int] = []
+        option_labels: dict[int, str] = {}
         if isinstance(interpretations, list) and interpretations:
             question = str(
                 intent.get("clarification_question")
-                or "请选择最接近您真实需求的解释。"
+                or "请选择一个或多个希望检索的细分方向。"
             )
             st.markdown(f"**{question}**")
-            option_labels = [
-                f"{item.get('label', '选项')} — {item.get('description', '')}"
-                for item in interpretations
+            option_labels = {
+                index: (
+                    f"{item.get('label', '选项')} — "
+                    f"{item.get('description', '')}"
+                )
+                for index, item in enumerate(interpretations)
                 if isinstance(item, dict)
-            ]
-            recommended = int(
-                intent.get("recommended_interpretation_index", 0) or 0
+            }
+            try:
+                recommended = int(
+                    intent.get("recommended_interpretation_index", 0) or 0
+                )
+            except (TypeError, ValueError):
+                recommended = 0
+            if recommended not in option_labels:
+                recommended = next(iter(option_labels), 0)
+            selected_indexes = st.multiselect(
+                "选择一个或多个检索方向",
+                options=list(option_labels),
+                default=[recommended] if option_labels else [],
+                format_func=lambda index: option_labels[index],
+                key=f"intent_choices_{revision}",
             )
-            recommended = max(0, min(recommended, len(option_labels) - 1))
-            selected_label = st.radio(
-                "选择检索方向",
-                option_labels,
-                index=recommended,
-                key=f"intent_choice_{revision}",
-            )
-            selected_index = option_labels.index(selected_label)
+            st.caption("可以多选；每个方向会保留自己的中英文检索词和相关性标准。")
         elif intent.get("clarification_question"):
             st.markdown(f"**{intent['clarification_question']}**")
+
+        selected_count = max(1, len(selected_indexes))
+        articles_per_intent = int(review.get("max_articles", 8))
+        planned_articles = calculate_multi_intent_article_limit(
+            articles_per_intent,
+            selected_count,
+        )
+        if selected_count > 1:
+            uncapped_articles = articles_per_intent * selected_count
+            quantity_text = (
+                f"已选择 {selected_count} 个方向：按每方向 "
+                f"{articles_per_intent} 篇扩大共享结果池，"
+                f"本次最多处理 {planned_articles} 篇"
+            )
+            if planned_articles < uncapped_articles:
+                quantity_text += "（已达到单次 40 篇上限）"
+            st.info(quantity_text)
+            st.caption(
+                "多个方向共享本次结果池；相关性筛选后，"
+                "不保证每个方向最终都正好返回相同数量。"
+            )
 
         custom_intent = st.text_area(
             "如果不是这个意思，请告诉我您真正想查的内容",
@@ -1638,6 +1647,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
             type="primary",
             width="stretch",
             key=f"confirm_intent_{revision}",
+            disabled=bool(option_labels) and not selected_indexes,
         )
         revise_clicked = revise_col.button(
             "按我的说明重新理解",
@@ -1647,13 +1657,21 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
         )
 
     if confirm_clicked:
-        confirmed = _confirmed_intent_from_review(intent, selected_index)
+        confirmed = _confirmed_intent_from_review(intent, selected_indexes)
         confirmed["used_fallback"] = bool(review.get("fallback_reason"))
         confirmed["fallback_reason"] = str(review.get("fallback_reason", ""))
+        selected_count = int(confirmed.get("selected_intent_count", 1) or 1)
+        articles_per_intent = int(review.get("max_articles", 8))
+        planned_articles = calculate_multi_intent_article_limit(
+            articles_per_intent,
+            selected_count,
+        )
         st.session_state.confirmed_search_request = {
             "original_query": review.get("original_query", ""),
             "intent": confirmed,
-            "max_articles": int(review.get("max_articles", 8)),
+            "max_articles": planned_articles,
+            "articles_per_intent": articles_per_intent,
+            "selected_intent_count": selected_count,
             "min_score": int(review.get("min_score", 70)),
             "english_keyword": str(review.get("english_keyword", "")),
         }
@@ -1743,8 +1761,15 @@ def _render_search_page(cloud_demo: bool) -> None:
         with st.expander("搜索设置"):
             option_cols = st.columns(2)
             max_articles = option_cols[0].slider(
-                "文章数量", min_value=1, max_value=20, value=8, step=1,
-                help="数量越多，分析时间和 AI 用量越高。",
+                "每个检索方向的文章数量",
+                min_value=1,
+                max_value=20,
+                value=8,
+                step=1,
+                help=(
+                    "选择多个细分意图时，文章数量会按方向数增加，"
+                    "单次最多处理 40 篇。数量越多，分析时间和 AI 用量越高。"
+                ),
             )
             min_score = option_cols[1].slider(
                 "案例入库门槛", min_value=0, max_value=100, value=70, step=5,
