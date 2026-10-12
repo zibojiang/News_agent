@@ -1983,6 +1983,7 @@ def run_pipeline(
     progress_callback: Callable[[str, float], None] | None = None,
     pre_fetched_articles: list[dict[str, Any]] | None = None,
     pre_screen_completed: bool = False,
+    db_path: str | None = None,
 ) -> dict[str, Any]:
     """
     执行完整的「抓取 → 提炼 → 入库」工作流。
@@ -1996,6 +1997,7 @@ def run_pipeline(
         progress_callback: 进度回调 (message, progress_float)
         pre_fetched_articles: 预先抓取的带 pre-AI 评分的文章列表，提供时跳过抓取阶段
         pre_screen_completed: 调用方是否已执行过相关性与来源 AI 初筛
+        db_path: 本次运行专用数据库；网页必须传入会话私有路径
 
     Returns:
         运行摘要字典，包含 AI、新闻入库、案例入库及错误统计
@@ -2228,7 +2230,7 @@ def run_pipeline(
             # 后置主题归类（无预设主题时）
             resolved_topic = topic
             if not topic or topic.get("topic_id") == "CUSTOM":
-                topics_df = load_topics(enabled_only=True)
+                topics_df = load_topics(enabled_only=True, db_path=db_path)
                 topic_records = topics_df.to_dict(orient="records")
                 matched = _classify_topic_posthoc(
                     result, industry_keyword, topic_records
@@ -2352,7 +2354,7 @@ def run_pipeline(
             _notify_progress(progress_callback, "正在写入新闻池并检查重复…", 0.9)
             try:
                 write_summary = append_cases_batch_with_summary(
-                    summary["cases"], min_score=min_score
+                    summary["cases"], min_score=min_score, db_path=db_path
                 )
                 summary["news_saved"] = int(write_summary["news_inserted"])
                 summary["refreshed"] = int(write_summary.get("refreshed", 0))
@@ -2404,7 +2406,7 @@ def run_pipeline(
         else:
             summary["status"] = "success"
         try:
-            summary["run_id"] = record_task_run(summary)
+            summary["run_id"] = record_task_run(summary, db_path=db_path)
         except Exception as exc:
             logger.error("写入任务日志失败: %s", exc, exc_info=True)
         progress_message = {

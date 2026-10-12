@@ -5,13 +5,18 @@ import unittest
 from unittest.mock import patch
 
 from search_task import get_background_search, start_background_search
+from session_workspace import SessionWorkspace
 
 
 class SearchTaskTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.workspace = SessionWorkspace()
+        self.addCleanup(self.workspace.close)
+
     def _wait(self, task_id: str) -> dict:
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
-            snapshot = get_background_search(task_id)
+            snapshot = get_background_search(task_id, owner_id=self.workspace.owner_id)
             if snapshot and snapshot["status"] in {"completed", "failed"}:
                 return snapshot
             time.sleep(0.01)
@@ -50,7 +55,8 @@ class SearchTaskTestCase(unittest.TestCase):
                     "max_articles": 8,
                     "min_score": 70,
                     "search_intent": {},
-                }
+                },
+                workspace=self.workspace,
             )
             snapshot = self._wait(task_id)
 
@@ -70,7 +76,8 @@ class SearchTaskTestCase(unittest.TestCase):
                     "confirmed_keyword": "测试",
                     "max_articles": 8,
                     "min_score": 70,
-                }
+                },
+                workspace=self.workspace,
             )
             snapshot = self._wait(task_id)
 

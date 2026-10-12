@@ -12,19 +12,32 @@ from streamlit.testing.v1 import AppTest
 from agent import SEARCH_RELEVANCE_RULE_VERSION, fallback_search_intent
 from database import load_last_search_state, load_topics, save_last_search_state
 from quality_scorer import NEWS_QUALITY_RULE_VERSION
+from session_workspace import SessionWorkspace
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _chinese_app() -> AppTest:
+def _chinese_app(workspace: SessionWorkspace | None = None) -> AppTest:
     """Keep existing interaction coverage in its original Chinese UI locale."""
     app = AppTest.from_file(PROJECT_ROOT / "app.py")
     app.session_state["ui_language"] = "zh"
+    if workspace is not None:
+        app.session_state["private_workspace"] = workspace
     return app.run(timeout=20)
 
 
 class AppSmokeTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.workspace = SessionWorkspace()
+        self.addCleanup(self.workspace.close)
+
+    def _save_state(self, state) -> None:
+        save_last_search_state(state, db_path=self.workspace.db_path)
+
+    def _load_state(self):
+        return load_last_search_state(db_path=self.workspace.db_path)
+
     def test_discards_legacy_cards_in_a_new_streamlit_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = str(Path(temp_dir) / "industry_news.db")
@@ -36,7 +49,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     "ADMIN_PASSWORD": "",
                 },
             ):
-                save_last_search_state(
+                self._save_state(
                     {
                         "keyword": "复星AI",
                         "articles": [
@@ -72,7 +85,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     }
                 )
 
-                app = _chinese_app()
+                app = _chinese_app(self.workspace)
                 self.assertEqual(list(app.exception), [])
                 self.assertFalse(
                     any(
@@ -80,7 +93,7 @@ class AppSmokeTestCase(unittest.TestCase):
                         for markdown in app.markdown
                     )
                 )
-                self.assertEqual(load_last_search_state(), {})
+                self.assertEqual(self._load_state(), {})
 
     def test_restores_cards_scored_with_current_rules(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -107,7 +120,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     "ADMIN_PASSWORD": "",
                 },
             ):
-                save_last_search_state(
+                self._save_state(
                     {
                         "keyword": "复星AI",
                         "articles": [
@@ -191,7 +204,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     }
                 )
 
-                app = _chinese_app()
+                app = _chinese_app(self.workspace)
                 self.assertEqual(list(app.exception), [])
                 self.assertTrue(
                     any(
@@ -214,7 +227,7 @@ class AppSmokeTestCase(unittest.TestCase):
                 original_articles = copy.deepcopy(app.session_state["fetched_articles"])
                 original_results = copy.deepcopy(app.session_state["fetched_results"])
                 original_summary = copy.deepcopy(app.session_state["last_run_summary"])
-                original_saved_state = load_last_search_state()
+                original_saved_state = self._load_state()
                 # AppTest exposes data_editor edits through the widget's state.
                 editor_key = "high_quality_editor_2026-07-30_08:00:00_75"
                 app.session_state[editor_key] = {
@@ -265,7 +278,7 @@ class AppSmokeTestCase(unittest.TestCase):
                 self.assertEqual(app.session_state["fetched_articles"], original_articles)
                 self.assertEqual(app.session_state["fetched_results"], original_results)
                 self.assertEqual(app.session_state["last_run_summary"], original_summary)
-                self.assertEqual(load_last_search_state(), original_saved_state)
+                self.assertEqual(self._load_state(), original_saved_state)
 
     def test_base_score_expander_keeps_ai_source_details(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -278,7 +291,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     "ADMIN_PASSWORD": "",
                 },
             ):
-                save_last_search_state(
+                self._save_state(
                     {
                         "keyword": "复星AI",
                         "articles": [
@@ -328,7 +341,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     }
                 )
 
-                app = _chinese_app()
+                app = _chinese_app(self.workspace)
                 self.assertEqual(list(app.exception), [])
                 self.assertTrue(
                     any(
@@ -364,11 +377,11 @@ class AppSmokeTestCase(unittest.TestCase):
                     "ADMIN_PASSWORD": "",
                 },
             ):
-                app = _chinese_app()
+                app = _chinese_app(self.workspace)
                 self.assertEqual(list(app.exception), [])
                 button_labels = [button.label for button in app.button]
                 self.assertIn("下一步：确认目标", button_labels)
-                self.assertIn("⚙️", button_labels)
+                self.assertIn("📋 我的记录", button_labels)
                 self.assertNotIn("解锁管理操作", button_labels)
                 self.assertTrue(
                     any("搜索新闻" in markdown.value for markdown in app.markdown)
@@ -607,7 +620,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     )
                 )
                 management_button = next(
-                    button for button in app.button if button.label == "⚙️"
+                    button for button in app.button if button.key == "open_history"
                 )
                 app.session_state["active_search_task_id"] = "test-running-task"
                 management_button.click().run(timeout=20)
@@ -617,14 +630,14 @@ class AppSmokeTestCase(unittest.TestCase):
                     "test-running-task",
                 )
                 self.assertTrue(
-                    any("管理台" in markdown.value for markdown in app.markdown)
+                    any("我的记录" in markdown.value for markdown in app.markdown)
                 )
                 tab_labels = [tab.label for tab in app.tabs]
-                self.assertIn("🗂️ 数据库管理", tab_labels)
-                self.assertIn("✅ 人工审核", tab_labels)
-                self.assertIn("⚙️ 系统设置", tab_labels)
+                self.assertIn("🔎 搜索记录", tab_labels)
+                self.assertIn("📰 我的新闻", tab_labels)
+                self.assertIn("📚 我的案例", tab_labels)
                 self.assertTrue(
-                    any("当前 AI 配置" in markdown.value for markdown in app.markdown)
+                    any("当前浏览器会话" in caption.value for caption in app.caption)
                 )
 
     def test_custom_intent_starts_search_without_second_confirmation(self) -> None:
@@ -639,7 +652,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     "ADMIN_PASSWORD": "",
                 },
             ):
-                app = _chinese_app()
+                app = _chinese_app(self.workspace)
                 app.session_state["search_intent_review"] = {
                     "original_query": "海外产品供应链",
                     "intent": {
@@ -726,7 +739,7 @@ class BilingualAppTestCase(unittest.TestCase):
         self.assertEqual(list(app.exception), [])
         self.assertEqual(app.session_state["ui_language"], "en")
         self.assertEqual(app.button(key="search_submit").label, "Next: confirm intent")
-        self.assertEqual(app.button(key="language_toggle").label, "中文")
+        self.assertEqual(app.button(key="language_toggle").label, "中/ENG")
         self.assertFalse(
             any("找到值得读的文旅新闻" in item.value for item in app.markdown)
         )
@@ -734,17 +747,17 @@ class BilingualAppTestCase(unittest.TestCase):
         app.button(key="language_toggle").click().run(timeout=20)
         self.assertEqual(list(app.exception), [])
         self.assertEqual(app.session_state["ui_language"], "zh")
-        self.assertEqual(app.button(key="language_toggle").label, "English")
+        self.assertEqual(app.button(key="language_toggle").label, "中/ENG")
         self.assertEqual(app.button(key="search_submit").label, "下一步：确认目标")
         self.assertTrue(
             any("找到值得读的文旅新闻" in item.value for item in app.markdown)
         )
 
-        app.button(key="open_management").click().run(timeout=20)
+        app.button(key="open_history").click().run(timeout=20)
         self.assertEqual(list(app.exception), [])
-        self.assertEqual(app.session_state["active_view"], "management")
+        self.assertEqual(app.session_state["active_view"], "history")
         self.assertEqual(app.session_state["ui_language"], "zh")
-        self.assertIn("⚙️ 系统设置", [tab.label for tab in app.tabs])
+        self.assertIn("🔎 搜索记录", [tab.label for tab in app.tabs])
 
         app.button(key="language_toggle").click().run(timeout=20)
         self.assertEqual(list(app.exception), [])
@@ -852,36 +865,18 @@ class BilingualAppTestCase(unittest.TestCase):
         self.assertEqual(app.session_state["ui_language"], "en")
         self.assertIn("en", app.query_params["lang"])
 
-    def test_language_switch_keeps_unsaved_topic_configuration(self) -> None:
+    def test_history_has_no_site_wide_admin_controls(self) -> None:
         app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+        app.button(key="open_history").click().run(timeout=20)
         self.assertEqual(list(app.exception), [])
-        app.button(key="open_management").click().run(timeout=20)
-        self.assertEqual(list(app.exception), [])
-        initial_topics = load_topics(include_custom=False)
-        self.assertFalse(initial_topics.empty)
-        topic_id = initial_topics.iloc[0]["topic_id"]
-        app.session_state["topics_editor"] = {
-            "edited_rows": {
-                0: {
-                    "search_keywords": "bilingual draft 保留搜索词",
-                    "enabled": False,
-                    "min_score": 85,
-                }
-            },
-            "added_rows": [],
-            "deleted_rows": [],
-        }
-        app.run(timeout=20)
-        app.button(key="language_toggle").click().run(timeout=20)
-        self.assertEqual(list(app.exception), [])
-        app.button(key="save_topic_settings").click().run(timeout=20)
-        self.assertEqual(list(app.exception), [])
-
-        updated_topics = load_topics(include_custom=False)
-        updated = updated_topics[updated_topics["topic_id"] == topic_id].iloc[0]
-        self.assertEqual(updated["search_keywords"], "bilingual draft 保留搜索词")
-        self.assertFalse(updated["enabled"])
-        self.assertEqual(updated["min_score"], 85)
+        self.assertIn("🔎 Search history", [tab.label for tab in app.tabs])
+        for language in ("zh", "en"):
+            app.button(key="language_toggle").click().run(timeout=20)
+            self.assertEqual(app.session_state["ui_language"], language)
+            self.assertEqual(list(app.exception), [])
+            self.assertNotIn("topics_editor", [item.key for item in app.dataframe])
+            self.assertNotIn("save_topic_settings", [item.key for item in app.button])
+            self.assertNotIn("⚙️", [item.label for item in app.button])
 
 
 if __name__ == "__main__":

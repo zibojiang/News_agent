@@ -8,9 +8,11 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter
+from datetime import datetime
 from typing import Any
 
 import agent
+from session_workspace import SessionWorkspace
 
 
 logger = logging.getLogger(__name__)
@@ -27,11 +29,18 @@ def _update_task(task_id: str, **values: Any) -> None:
             task.update(values)
 
 
-def get_background_search(task_id: str) -> dict[str, Any] | None:
-    """返回任务快照，调用方无法修改后台线程持有的数据。"""
+def get_background_search(task_id: str, *, owner_id: str) -> dict[str, Any] | None:
+    """Only the originating server-side session may read a task snapshot."""
     with _TASK_LOCK:
         task = _TASKS.get(task_id)
-        return copy.deepcopy(task) if task is not None else None
+        if not owner_id or task is None or task["owner_id"] != owner_id:
+            return None
+        return copy.deepcopy(task)
+
+
+def _forget_task(task_id: str) -> None:
+    with _TASK_LOCK:
+        _TASKS.pop(task_id, None)
 
 
 def _ranking_score(detail: dict[str, Any]) -> float:
@@ -46,7 +55,9 @@ def _ranking_score(detail: dict[str, Any]) -> float:
     return -1.0
 
 
-def _run_background_search(task_id: str, request: dict[str, Any]) -> None:
+def _run_background_search(
+    task_id: str, request: dict[str, Any], workspace: SessionWorkspace
+) -> None:
     articles: list[dict[str, Any]] = []
     search_started = perf_counter()
     try:
@@ -159,6 +170,7 @@ def _run_background_search(task_id: str, request: dict[str, Any]) -> None:
             ),
             pre_fetched_articles=articles,
             pre_screen_completed=True,
+            db_path=workspace.db_path,
         )
         run_summary["search_seconds"] = search_seconds
         run_summary["analysis_seconds"] = perf_counter() - analysis_started
@@ -209,12 +221,17 @@ def _run_background_search(task_id: str, request: dict[str, Any]) -> None:
         )
 
 
-def start_background_search(request: dict[str, Any]) -> str:
+def start_background_search(
+    request: dict[str, Any], *, workspace: SessionWorkspace
+) -> str:
     """启动后台搜索并立即返回任务 ID。"""
     task_id = uuid.uuid4().hex
     with _TASK_LOCK:
         _TASKS[task_id] = {
             "task_id": task_id,
+            "owner_id": workspace.owner_id,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "original_query": str(request.get("original_query") or request.get("primary_query") or ""),
             "status": "running",
             "stage": "queued",
             "message": "搜索任务已提交…",
@@ -226,5 +243,6 @@ def start_background_search(request: dict[str, Any]) -> str:
             "run_summary": {},
             "error": "",
         }
-    _TASK_EXECUTOR.submit(_run_background_search, task_id, copy.deepcopy(request))
+    workspace.on_close(lambda: _forget_task(task_id))
+    _TASK_EXECUTOR.submit(_run_background_search, task_id, copy.deepcopy(request), workspace)
     return task_id

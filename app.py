@@ -1,8 +1,7 @@
 """
 app.py — 文旅行业情报 Agent Streamlit 前端
 
-功能：研究主题采集、新闻池、量化案例库、人工审核、
-主题配置、定时 worker 状态和任务日志。
+功能：新闻搜索、当前会话的搜索历史、新闻池、量化案例库和人工审核。
 """
 
 from __future__ import annotations
@@ -44,9 +43,6 @@ from agent import (
     calculate_recommendation_score,
     fallback_search_intent,
     fetch_and_pre_score,
-    get_ai_provider,
-    get_gemini_model,
-    get_openai_model,
     merge_search_interpretations,
     run_pipeline,
     score_sources_with_ai,
@@ -54,15 +50,11 @@ from agent import (
 from database import (
     JSON_COLUMNS,
     format_json_list_for_display,
-    get_scheduler_health,
     initialize_database,
     load_cases,
     load_last_search_state,
-    load_task_runs,
-    load_topics,
     save_last_search_state,
     update_case_review_status,
-    update_topic,
 )
 from quality_scorer import NEWS_QUALITY_RULE_VERSION
 from result_table import (
@@ -72,12 +64,26 @@ from result_table import (
     selected_export_rows,
 )
 from search_task import get_background_search, start_background_search
+from session_workspace import session_workspace
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _workspace():
+    return session_workspace(st.session_state)
+
+
+def _db_path() -> str:
+    return _workspace().db_path
+
+
+def _owned_task(task_id: str) -> dict[str, Any] | None:
+    return get_background_search(task_id, owner_id=_workspace().owner_id)
+
 
 def _parse_quality_json(raw: Any) -> dict:
     """从 DB 的 quality_json 字段解析质量评分字典。"""
@@ -210,7 +216,7 @@ st.markdown(
         --brand: #2457d6;
         --brand-soft: #eef4ff;
     }
-    .block-container {max-width: 1180px; padding-top: 2rem; padding-bottom: 3rem;}
+    .block-container {max-width: 1180px; padding-top: 5.5rem; padding-bottom: 3rem;}
     .news-hero {
         padding: 2.2rem 2.4rem 1.8rem;
         border: 1px solid #dfe7fb;
@@ -281,7 +287,7 @@ st.markdown(
     div[data-testid="stExpander"] {border-color: var(--line); border-radius: 12px;}
     .footer-note {color: #98a2b3; font-size: .78rem; text-align: center; margin-top: 2rem;}
     @media (max-width: 700px) {
-        .block-container {padding-top: 1rem;}
+        .block-container {padding-top: 5rem;}
         .news-hero {padding: 1.45rem 1.2rem 1.1rem; border-radius: 16px;}
     }
     </style>
@@ -289,7 +295,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-initialize_database()
+initialize_database(_db_path())
 
 
 def _display_cases(df: pd.DataFrame) -> pd.DataFrame:
@@ -791,7 +797,7 @@ def _persist_latest_search(
         "search_intent": search_intent or {},
     }
     try:
-        save_last_search_state(state)
+        save_last_search_state(state, db_path=_db_path())
     except Exception as exc:
         logger.warning("保存最近搜索状态失败: %s", type(exc).__name__)
 
@@ -885,7 +891,7 @@ def _restore_latest_search() -> None:
             return
         _clear_search_session()
         try:
-            save_last_search_state({})
+            save_last_search_state({}, db_path=_db_path())
         except Exception as exc:
             logger.warning("清理旧搜索状态失败: %s", type(exc).__name__)
         return
@@ -893,7 +899,7 @@ def _restore_latest_search() -> None:
         return
     st.session_state.latest_search_restored = True
     try:
-        state = load_last_search_state()
+        state = load_last_search_state(db_path=_db_path())
     except Exception as exc:
         logger.warning("读取最近搜索状态失败: %s", type(exc).__name__)
         return
@@ -905,7 +911,7 @@ def _restore_latest_search() -> None:
     raw_results = state.get("results", {})
     if not _completed_search_uses_current_scoring(articles, raw_results):
         try:
-            save_last_search_state({})
+            save_last_search_state({}, db_path=_db_path())
         except Exception as exc:
             logger.warning("清理旧搜索状态失败: %s", type(exc).__name__)
         return
@@ -1185,14 +1191,10 @@ def _set_active_view(view: str) -> None:
 
 
 def _active_search_task_id() -> str:
-    """从会话或 URL 中恢复当前后台搜索任务。"""
-    task_id = str(st.session_state.get("active_search_task_id") or "").strip()
-    if not task_id:
-        query_task = st.query_params.get("search_task", "")
-        task_id = str(query_task or "").strip()
-        if task_id:
-            st.session_state.active_search_task_id = task_id
-    return task_id
+    """Task identity is server-side only; shared URLs never restore private data."""
+    if "search_task" in st.query_params:
+        del st.query_params["search_task"]
+    return str(st.session_state.get("active_search_task_id") or "").strip()
 
 
 def _clear_active_search_task() -> None:
@@ -1235,8 +1237,8 @@ def _apply_completed_search_task(snapshot: dict[str, Any]) -> None:
 
 @st.fragment(run_every=2)
 def _render_active_search_task(task_id: str) -> None:
-    """自动轮询后台搜索；切换管理台不会销毁该 fragment 之外的任务。"""
-    snapshot = get_background_search(task_id)
+    """自动轮询后台搜索；切换我的记录不会销毁该 fragment 之外的任务。"""
+    snapshot = _owned_task(task_id)
     if snapshot is None:
         st.error(t("后台搜索任务已不存在，可能是应用进程重新启动。", "This background task is no longer available. The application may have restarted."))
         if st.button(t("清除失效任务", "Clear unavailable task"), key=f"clear_missing_task_{task_id}"):
@@ -1266,7 +1268,7 @@ def _render_active_search_task(task_id: str) -> None:
         float(snapshot.get("progress", 0.0) or 0.0),
         text=localize(str(snapshot.get("message") or "后台任务运行中…")),
     )
-    st.caption(t("你可以进入管理台查看其他数据；搜索和 AI 分析会继续运行。", "You can open the admin console while search and AI analysis continue."))
+    st.caption(t("你可以进入“我的记录”；搜索和 AI 分析会继续运行。", "You can open My history while search and AI analysis continue."))
     articles = list(snapshot.get("articles") or [])
     if articles:
         _render_article_cards(
@@ -1277,18 +1279,18 @@ def _render_active_search_task(task_id: str) -> None:
 
 
 def _render_background_task_banner() -> None:
-    """在管理台提示仍在运行或已完成的用户搜索。"""
+    """在我的记录中提示仍在运行或已完成的用户搜索。"""
     task_id = _active_search_task_id()
     if not task_id:
         return
-    snapshot = get_background_search(task_id)
+    snapshot = _owned_task(task_id)
     if snapshot is None:
         st.warning(t("先前的搜索任务已失效，请返回搜索页重新发起。", "The previous task is no longer available. Return to search to start again."))
         return
     status = str(snapshot.get("status") or "running")
     if status == "running":
         st.info(
-            t("后台搜索仍在运行：{message} 你可以继续使用管理台。", "Search is still running: {message} You can keep using the admin console.").format(message=localize(snapshot.get('message', '')))
+            t("后台搜索仍在运行：{message} 你可以继续查看我的记录。", "Search is still running: {message} You can keep browsing My history.").format(message=localize(snapshot.get('message', '')))
         )
         st.progress(float(snapshot.get("progress", 0.0) or 0.0))
     elif status == "completed":
@@ -1309,7 +1311,7 @@ def _render_news_pool() -> None:
         t("<p class=\"section-note\">按主题、审核状态或相关性快速缩小范围。</p>", "<p class=\"section-note\">Filter by topic, review status, or relevance.</p>"),
         unsafe_allow_html=True,
     )
-    news_df = _enrich_with_quality(load_cases())
+    news_df = _enrich_with_quality(load_cases(db_path=_db_path()))
     filter_cols = st.columns([1, 1, 1, 1])
     topic_filter = filter_cols[0].selectbox(
         t("主题筛选", "Topic filter"),
@@ -1377,7 +1379,7 @@ def _render_case_library(allow_review: bool = False) -> None:
         t("<p class=\"section-note\">只展示达到入库门槛且包含可核验量化信息的新闻。</p>", "<p class=\"section-note\">News that meets the inclusion threshold and contains verifiable quantitative information.</p>"),
         unsafe_allow_html=True,
     )
-    cases_df = _enrich_with_quality(load_cases(qualified_only=True))
+    cases_df = _enrich_with_quality(load_cases(qualified_only=True, db_path=_db_path()))
     if cases_df.empty:
         st.info(t("暂无达标案例。可以降低搜索页的入库门槛，或尝试更具体的关键词。", "No qualified cases yet. Try a lower inclusion threshold or more specific keywords."))
         return
@@ -1443,7 +1445,7 @@ def _render_case_library(allow_review: bool = False) -> None:
                 st.write("")
                 if st.button(t("保存", "Save"), width="stretch", key="save_review"):
                     update_case_review_status(
-                        case_options[selected_case_label], selected_status
+                        case_options[selected_case_label], selected_status, db_path=_db_path()
                     )
                     st.rerun()
 
@@ -1453,154 +1455,6 @@ def _render_case_library(allow_review: bool = False) -> None:
         file_name=export_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-
-
-def _render_dashboard() -> None:
-    all_news = load_cases()
-    qualified_news = (
-        all_news[all_news["is_qualified"] == 1] if not all_news.empty else all_news
-    )
-    pending_count = (
-        int((qualified_news["review_status"] == "待审核").sum())
-        if not qualified_news.empty
-        else 0
-    )
-    covered_topics = int(all_news["topic_id"].nunique()) if not all_news.empty else 0
-    metric_cols = st.columns(4)
-    metric_cols[0].metric(t("新闻总量", "Total articles"), len(all_news))
-    metric_cols[1].metric(t("达标案例", "Qualified cases"), len(qualified_news))
-    metric_cols[2].metric(t("待审核", "Pending review"), pending_count)
-    metric_cols[3].metric(t("主题覆盖", "Topic coverage"), f"{covered_topics} / 28")
-
-    if all_news.empty:
-        st.info(t("暂无数据。返回搜索首页完成第一次新闻搜索即可开始积累。", "No data yet. Run your first search to start collecting articles."))
-        return
-
-    left, right = st.columns([2, 3])
-    with left:
-        st.markdown(t("#### 主题覆盖", "#### Topic coverage"))
-        topic_counts = (
-            all_news.groupby("topic_name").size().sort_values(ascending=False).head(12)
-        )
-        st.bar_chart(topic_counts, horizontal=True)
-    with right:
-        st.markdown(t("#### 最近发现", "#### Recently found"))
-        recent_cols = ["发现时间", "新闻标题", "研究主题", "相关性", "原文链接"]
-        recent_df = _display_cases(_enrich_with_quality(all_news).head(8))
-        st.dataframe(
-            localize_dataframe(recent_df[[col for col in recent_cols if col in recent_df.columns]]),
-            width="stretch",
-            hide_index=True,
-            column_config=_table_config(),
-        )
-
-
-def _render_topic_management() -> None:
-    st.markdown(t("#### 研究主题配置", "#### Research topic settings"))
-    st.caption(
-        t("控制周期采集使用的关键词、启用状态、入库门槛和篇数。修改只写入数据库，不会改动原始 Excel。", "Set the keywords, active status, inclusion threshold, and article limit for scheduled collection. Changes are saved to the database; the original Excel file is unchanged.")
-    )
-    editable_topics = load_topics(include_custom=False)
-    editable_columns = [
-        "topic_id", "dimension", "category", "topic_name", "report_frequency",
-        "search_keywords", "enabled", "min_score", "max_articles",
-        "collection_interval_hours",
-    ]
-    # Column labels affect the editor's widget identity. Keep the edited data
-    # separately so changing the interface language cannot discard a draft.
-    if (
-        "topics_editor_data" not in st.session_state
-        or st.session_state.get("topics_editor_language") != get_language()
-    ):
-        st.session_state.topics_editor_data = st.session_state.get(
-            "topics_editor_draft", editable_topics[editable_columns]
-        ).copy()
-        st.session_state.topics_editor_language = get_language()
-        st.session_state.pop("topics_editor", None)
-    edited_topics = st.data_editor(
-        st.session_state.topics_editor_data,
-        width="stretch",
-        hide_index=True,
-        disabled=["topic_id", "dimension", "category", "topic_name", "report_frequency"],
-        column_config={
-            "topic_id": t("主题 ID", "Topic ID"),
-            "dimension": t("维度", "Dimension"),
-            "category": t("分类", "Category"),
-            "topic_name": t("研究主题", "Research topic"),
-            "report_frequency": t("报告频率", "Report frequency"),
-            "search_keywords": st.column_config.TextColumn(t("新闻搜索词", "News search keywords"), width="large"),
-            "enabled": st.column_config.CheckboxColumn(t("启用", "Enabled")),
-            "min_score": st.column_config.NumberColumn(
-                t("入库分数", "Inclusion score"), min_value=0, max_value=100
-            ),
-            "max_articles": st.column_config.NumberColumn(
-                t("单次篇数", "Articles per run"), min_value=1, max_value=30
-            ),
-            "collection_interval_hours": st.column_config.NumberColumn(
-                t("采集间隔/小时", "Collection interval (hours)"), min_value=1
-            ),
-        },
-        key="topics_editor",
-    )
-    st.session_state.topics_editor_draft = edited_topics.copy()
-    if st.button(t("💾 保存主题配置", "💾 Save topic settings"), type="primary", key="save_topic_settings"):
-        for row in edited_topics.to_dict(orient="records"):
-            update_topic(
-                str(row["topic_id"]),
-                {
-                    "search_keywords": row["search_keywords"],
-                    "enabled": row["enabled"],
-                    "min_score": row["min_score"],
-                    "max_articles": row["max_articles"],
-                    "collection_interval_hours": row["collection_interval_hours"],
-                },
-            )
-        st.success(t("主题配置已保存。", "Topic settings saved."))
-
-
-def _render_task_center(cloud_demo: bool) -> None:
-    st.markdown(t("#### 任务状态与运行日志", "#### Task status and run history"))
-    health_cols = st.columns(3)
-    if cloud_demo:
-        health_cols[0].metric(t("运行模式", "Run mode"), t("Cloud 展示", "Cloud demo"))
-        health_cols[1].metric(t("定时 Worker", "Scheduled worker"), t("未启用", "Disabled"))
-        health_cols[2].metric(t("数据持久化", "Data persistence"), t("临时", "Temporary"))
-        st.info(t("云端展示版支持手动搜索，不运行后台定时任务。", "The cloud demo supports manual search. Scheduled collection is disabled."))
-    else:
-        current_health = get_scheduler_health()
-        health_cols[0].metric(
-            t("Worker 状态", "Worker status"), t("运行中", "Running") if current_health["running"] else t("未运行", "Stopped")
-        )
-        health_cols[1].metric(t("最后心跳", "Last heartbeat"), current_health.get("last_heartbeat") or "-")
-        health_cols[2].metric(
-            t("扫描间隔", "Polling interval"), t("{minutes} 分钟", "{minutes} minutes").format(minutes=os.getenv('SCHEDULER_POLL_MINUTES', '30'))
-        )
-        if not current_health["running"]:
-            st.info(t("周期采集当前未运行；手动新闻搜索不受影响。", "Scheduled collection is not running. Manual search is available."))
-
-    runs_df = load_task_runs(limit=100)
-    if runs_df.empty:
-        st.info(t("暂无任务运行记录。", "No task history yet."))
-        return
-    status_map = {"success": "成功", "partial": "部分成功", "failed": "失败"}
-    trigger_map = {"manual": "手动", "scheduled": "定时"}
-    display_runs = runs_df.copy()
-    display_runs["status"] = display_runs["status"].map(status_map).fillna(
-        display_runs["status"]
-    )
-    display_runs["trigger_type"] = display_runs["trigger_type"].map(
-        trigger_map
-    ).fillna(display_runs["trigger_type"])
-    display_runs = display_runs.rename(
-        columns={
-            "id": "任务ID", "topic_id": "主题ID", "keyword": "搜索词",
-            "trigger_type": "触发方式", "started_at": "开始时间",
-            "finished_at": "结束时间", "status": "状态", "processed": "处理",
-            "saved": "新增案例", "skipped": "跳过", "error_count": "错误数",
-            "errors": "错误详情",
-        }
-    )
-    st.dataframe(localize_dataframe(display_runs), width="stretch", hide_index=True)
 
 
 def _confirmed_intent_from_review(
@@ -1777,22 +1631,13 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
 def _render_search_page(cloud_demo: bool) -> None:
     active_task_id = _active_search_task_id()
     active_task = (
-        get_background_search(active_task_id) if active_task_id else None
+        _owned_task(active_task_id) if active_task_id else None
     )
     if not active_task_id:
         _restore_latest_search()
     task_notice = str(st.session_state.pop("search_task_notice", "")).strip()
     if task_notice:
         st.warning(localize(task_notice))
-    _, action_col = st.columns([12, 1])
-    with action_col:
-        st.button(
-            "⚙️",
-            key="open_management",
-            help=t("打开管理台（后台搜索和 AI 分析不会中断）", "Open the admin console (search and AI analysis will continue)"),
-            on_click=_set_active_view,
-            args=("management",),
-        )
     st.markdown(
         t("\n        <div class=\"news-hero\">\n            <div class=\"hero-kicker\">Travel Intelligence Search</div>\n            <div class=\"main-header\">找到值得读的文旅新闻</div>\n            <p class=\"sub-header\">输入一个公司、事件或行业关键词。系统会搜索真实新闻、分析相关性，<br>并把包含可核验数字的内容整理成案例。</p>\n        </div>\n        ", "\n        <div class=\"news-hero\">\n            <div class=\"hero-kicker\">Travel Intelligence Search</div>\n            <div class=\"main-header\">Find travel news worth reading</div>\n            <p class=\"sub-header\">Enter a company, event, or industry keyword. Search real news, assess relevance,<br>and turn verifiable figures into useful cases.</p>\n        </div>\n        "),
         unsafe_allow_html=True,
@@ -1853,7 +1698,7 @@ def _render_search_page(cloud_demo: bool) -> None:
         )
 
     if cloud_demo:
-        st.caption(t("当前是云端展示模式；应用重启后，临时数据可能重置。", "Cloud demo mode: temporary data may reset when the app restarts."))
+        st.caption(t("无需登录；搜索记录仅在当前浏览器会话内保留。", "No sign-in required. Search history is kept only for this browser session."))
 
     if run_button:
         keyword = search_keyword.strip()
@@ -1928,10 +1773,11 @@ def _render_search_page(cloud_demo: bool) -> None:
                     search_intent.get("english_queries", []) or []
                 ),
                 "search_intent": search_intent,
-            }
+            },
+            workspace=_workspace(),
         )
+        st.session_state.setdefault("search_history", []).append(task_id)
         st.session_state.active_search_task_id = task_id
-        st.query_params["search_task"] = task_id
         st.rerun()
 
     active_task_id = _active_search_task_id()
@@ -1982,7 +1828,7 @@ def _render_search_page(cloud_demo: bool) -> None:
                     if not articles:
                         st.session_state.pop("pending_analysis", None)
                         st.session_state.fetched_articles = []
-                        save_last_search_state({})
+                        save_last_search_state({}, db_path=_db_path())
                         progress_bar.progress(1.0, text=t("搜索相关性初筛完成", "Relevance screening complete"))
                         st.warning(
                             t("本次找到的候选文章与搜索意图的相关性均低于 {threshold} 分，已不作为有效结果展示。", "All candidate articles scored below {threshold} for relevance and have been excluded from the results.").format(threshold=SEARCH_RELEVANCE_DISPLAY_THRESHOLD)
@@ -2014,6 +1860,7 @@ def _render_search_page(cloud_demo: bool) -> None:
                     progress_callback=update_progress,
                     pre_fetched_articles=articles,
                     pre_screen_completed=True,
+                    db_path=_db_path(),
                 )
                 run_summary["search_seconds"] = pending_analysis["search_seconds"]
                 run_summary["analysis_seconds"] = perf_counter() - analysis_started
@@ -2083,130 +1930,98 @@ def _render_search_page(cloud_demo: bool) -> None:
         _render_run_summary(last_run_summary)
 
     st.divider()
-    news_tab, cases_tab = st.tabs([t("📰 新闻池", "📰 News pool"), t("📚 案例库", "📚 Case library")])
+    news_tab, cases_tab = st.tabs([t("📰 我的新闻", "📰 My news"), t("📚 我的案例", "📚 My cases")])
     with news_tab:
         _render_news_pool()
     with cases_tab:
         _render_case_library()
 
 
-def _render_management_page(cloud_demo: bool) -> None:
-    back_col, title_col = st.columns([2, 10])
-    with back_col:
-        st.button(
-            t("← 返回搜索", "← Back to search"),
-            key="back_to_search",
-            help=t("返回新闻搜索；后台任务不会中断", "Return to news search; background tasks will continue"),
-            on_click=_set_active_view,
-            args=("search",),
-            width="stretch",
-        )
-    with title_col:
-        st.markdown(t("<p class=\"main-header\" style=\"font-size:2rem\">管理台</p>", "<p class=\"main-header\" style=\"font-size:2rem\">Admin console</p>"), unsafe_allow_html=True)
-        st.markdown(
-            t("<p class=\"sub-header\">查看数据积累、审核案例、配置研究主题和排查任务运行。</p>", "<p class=\"sub-header\">Explore collected data, review cases, manage topics, and inspect task runs.</p>"),
-            unsafe_allow_html=True,
-        )
-    st.info(
-        t("当前管理台为开放模式，无需管理员密码。任何能访问网页的人都可以审核案例和修改主题配置。", "The admin console is open without a password. Anyone with access to this site can review cases and change topic settings."),
-        icon="ℹ️",
+def _render_history_page() -> None:
+    st.button(
+        t("← 返回搜索", "← Back to search"), key="back_to_search",
+        on_click=_set_active_view, args=("search",),
     )
+    st.markdown(t("## 我的记录", "## My history"))
+    st.caption(t(
+        "仅显示当前浏览器会话的记录。刷新、新开标签页或关闭后重新打开可能开始新会话；重要结果请及时导出。",
+        "Only this browser session's records are shown. Reloading, opening another tab, or reopening the page may start a new session. Export any results you want to keep.",
+    ))
     _render_background_task_banner()
-
-    database_tab, review_tab, settings_tab = st.tabs(
-        [t("🗂️ 数据库管理", "🗂️ Data management"), t("✅ 人工审核", "✅ Review"), t("⚙️ 系统设置", "⚙️ Settings")]
-    )
-    with database_tab:
-        _render_dashboard()
-        st.divider()
+    history_tab, news_tab, cases_tab = st.tabs([
+        t("🔎 搜索记录", "🔎 Search history"),
+        t("📰 我的新闻", "📰 My news"),
+        t("📚 我的案例", "📚 My cases"),
+    ])
+    with history_tab:
+        task_ids = st.session_state.get("search_history", [])
+        if not task_ids:
+            st.info(t("本次会话还没有搜索记录。", "No searches in this session yet."))
+        statuses = {
+            "running": t("进行中", "In progress"),
+            "completed": t("已完成", "Completed"),
+            "failed": t("失败", "Failed"),
+        }
+        for task_id in reversed(task_ids):
+            snapshot = _owned_task(task_id)
+            if snapshot is None:
+                continue
+            with st.container(border=True):
+                st.write(snapshot.get("original_query") or snapshot.get("keyword", ""))
+                st.caption(f"{snapshot.get('created_at', '')} · {statuses.get(snapshot['status'], snapshot['status'])}")
+                st.caption(localize(snapshot.get("message", "")))
+                if snapshot["status"] == "completed" and snapshot.get("articles"):
+                    if st.button(
+                        t("查看结果", "View results"), key=f"history_result_{task_id}",
+                        disabled=bool(_active_search_task_id()),
+                    ):
+                        _apply_completed_search_task(snapshot)
+                        _set_active_view("search")
+                        st.rerun()
+    with news_tab:
         _render_news_pool()
-    with review_tab:
+    with cases_tab:
         _render_case_library(allow_review=True)
-    with settings_tab:
-        active_provider = get_ai_provider()
-        active_model = (
-            get_gemini_model()
-            if active_provider == "gemini"
-            else get_openai_model()
-        )
-        st.markdown(t("<p class=\"section-title\">当前 AI 配置</p>", "<p class=\"section-title\">Current AI configuration</p>"), unsafe_allow_html=True)
-        config_cols = st.columns(2)
-        config_cols[0].metric(t("模型提供方", "Model provider"), active_provider)
-        config_cols[1].metric(t("当前模型", "Current model"), active_model)
-        st.caption(t("模型和 API Key 继续通过环境变量配置，页面不会显示或保存密钥。", "Configure the model and API key through environment variables. Keys are never displayed or saved on this page."))
-        topic_settings, task_status = st.tabs([t("🎯 研究主题", "🎯 Research topics"), t("⏱️ 定时任务与日志", "⏱️ Scheduled tasks and logs")])
-        with topic_settings:
-            _render_topic_management()
-        with task_status:
-            _render_task_center(cloud_demo)
 
 
 cloud_demo = is_cloud_demo()
-if "active_view" not in st.session_state:
+if st.session_state.get("active_view") not in {"search", "history"}:
     st.session_state.active_view = "search"
 
 with st.sidebar:
     st.markdown(t("### 📰 文旅新闻搜索", "### 📰 Travel News Search"))
     st.caption(t("搜索真实新闻，沉淀量化案例。", "Find real news. Build evidence-backed cases."))
     st.button(
-        t("🔎 搜索首页", "🔎 Search"),
-        key="sidebar_search",
-        width="stretch",
+        t("🔎 搜索首页", "🔎 Search"), key="sidebar_search", width="stretch",
         type="primary" if st.session_state.active_view == "search" else "secondary",
-        on_click=_set_active_view,
-        args=("search",),
+        on_click=_set_active_view, args=("search",),
     )
     st.button(
-        t("⚙️ 管理台", "⚙️ Admin console"),
-        key="sidebar_management",
-        width="stretch",
-        type="primary" if st.session_state.active_view == "management" else "secondary",
-        help=t("查看数据库、人工审核和系统设置；后台搜索不会中断", "Open data, reviews, and settings; background search will continue"),
-        on_click=_set_active_view,
-        args=("management",),
+        t("📋 我的记录", "📋 My history"), key="sidebar_history", width="stretch",
+        type="primary" if st.session_state.active_view == "history" else "secondary",
+        on_click=_set_active_view, args=("history",),
     )
-    sidebar_task_id = _active_search_task_id()
-    if sidebar_task_id:
-        sidebar_task = get_background_search(sidebar_task_id)
-        if sidebar_task and sidebar_task.get("status") == "running":
-            st.caption(f"⏳ {localize(sidebar_task.get('message', '后台搜索运行中…'))}")
-        elif sidebar_task and sidebar_task.get("status") == "completed":
-            st.caption(t("✅ 后台搜索已完成，返回搜索页查看", "✅ Search complete. Return to search to view results."))
-        elif sidebar_task:
-            st.caption(t("⚠️ 后台搜索需要处理", "⚠️ The background search needs attention"))
     st.divider()
-    if cloud_demo:
-        st.caption(t("Cloud 展示模式 · 数据可能随重启重置", "Cloud demo · Data may reset after a restart"))
-    else:
-        scheduler_health = get_scheduler_health()
-        st.caption(
-            t("定时采集：{status}", "Scheduled collection: {status}").format(status=t("运行中", "Running") if scheduler_health["running"] else t("未运行", "Stopped"))
-        )
+    st.caption(t("无需登录 · 记录仅限当前会话", "No sign-in · Records are private to this session"))
 
-_, language_col = st.columns([10, 2])
-with language_col:
+with st.container(key="page_toolbar", horizontal=True, horizontal_alignment="right"):
     st.button(
-        "中文" if get_language() == "en" else "English",
-        key="language_toggle",
-        on_click=toggle_language,
-        help=t("切换为英文", "Switch to Chinese"),
-        width="stretch",
+        t("📋 我的记录", "📋 My history"), key="open_history", width="content",
+        help=t("查看本次会话的搜索、新闻和案例", "View this session's searches, news, and cases"),
+        on_click=_set_active_view, args=("history",),
+    )
+    st.button(
+        "中/ENG", key="language_toggle", on_click=toggle_language,
+        help=t("当前为中文，点击切换英文", "Currently English; click to switch to Chinese"),
+        width="content",
     )
 
-if st.session_state.active_view == "management":
-    _render_management_page(cloud_demo)
+if st.session_state.active_view == "history":
+    _render_history_page()
 else:
     _render_search_page(cloud_demo)
 
-active_provider = get_ai_provider()
-active_model = (
-    get_gemini_model() if active_provider == "gemini" else get_openai_model()
-)
-st.markdown(
-    t('<p class="footer-note">AI：{provider} / {model} · 运行模式：{mode}</p>', '<p class="footer-note">AI: {provider} / {model} · Run mode: {mode}</p>').format(
-        provider=active_provider,
-        model=active_model,
-        mode=t("云端展示", "Cloud demo") if cloud_demo else t("本地", "Local"),
-    ),
-    unsafe_allow_html=True,
-)
+st.caption(t(
+    "本次会话的搜索与其他访客隔离。关闭页面前，可将所需结果导出保存。",
+    "Your session's searches are separate from other visitors. Export results you want to keep before leaving.",
+))
