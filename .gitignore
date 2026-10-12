@@ -21,6 +21,8 @@ data/
 
 # macOS
 .DS_Store
+__MACOSX/
+._*
 
 # 导出文件
 *.xlsx
@@ -28,6 +30,10 @@ data/
 
 # 虚拟环境
 .venv
+.venv-win/
 .venv_broken_*/
 venv/
 env/
+
+# Local test/build scratch files
+.local-tmp/

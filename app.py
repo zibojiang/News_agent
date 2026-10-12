@@ -17,6 +17,15 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+from i18n import (
+    get_language,
+    init_language,
+    label_formatter,
+    localize,
+    localize_dataframe,
+    t,
+    toggle_language,
+)
 
 # 本地开发时，Streamlit 每次重新运行都刷新 .env；Cloud 环境继续以
 # Streamlit Secrets 注入的环境变量为准。
@@ -98,7 +107,7 @@ def _quality_label_badge(label: str) -> str:
         "偏低": "🟠",
         "较低": "🔴",
     }
-    return mapping.get(label, "⚪") + " " + label
+    return mapping.get(label, "⚪") + " " + localize(label)
 
 
 BASE_QUALITY_DIMENSIONS = {
@@ -182,8 +191,10 @@ def _enrich_with_quality(df: pd.DataFrame) -> pd.DataFrame:
     df["quality_label"] = labels
     return df
 
+init_language()
+
 st.set_page_config(
-    page_title="文旅新闻搜索",
+    page_title=t("文旅新闻搜索", "Travel News Intelligence"),
     page_icon="📰",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -236,14 +247,14 @@ st.markdown(
         padding: .85rem 1rem;
         background: #fff;
     }
-    [data-testid="stForm"] {
+    .st-key-news_search_form {
         border: 2px solid #5f7fe8;
         border-radius: 18px;
         padding: 1.25rem 1.25rem .7rem;
         background: #fff;
         box-shadow: 0 12px 30px rgba(36, 87, 214, .13);
     }
-    [data-testid="stForm"] [data-testid="stTextInput"] input {
+    .st-key-news_search_form [data-testid="stTextInput"] input {
         min-height: 3.35rem;
         border: 2px solid #9db2ef;
         border-radius: 11px;
@@ -251,11 +262,11 @@ st.markdown(
         font-size: 1.03rem;
         padding-inline: 1rem;
     }
-    [data-testid="stForm"] [data-testid="stTextInput"] input:focus {
+    .st-key-news_search_form [data-testid="stTextInput"] input:focus {
         border-color: var(--brand);
         box-shadow: 0 0 0 3px rgba(36, 87, 214, .12);
     }
-    [data-testid="stForm"] [data-testid="stFormSubmitButton"] button {
+    .st-key-news_search_form [data-testid="stButton"] button {
         min-height: 3.35rem;
         border-radius: 11px;
         font-weight: 750;
@@ -344,20 +355,21 @@ def _display_cases(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _table_config() -> dict[str, Any]:
-    return {
+    configs = {
         "原文链接": st.column_config.LinkColumn(
-            "原文链接", display_text="🔗 查看原文"
+            t("原文链接", "Source link"), display_text=t("🔗 查看原文", "🔗 Read article")
         ),
         "相关性": st.column_config.ProgressColumn(
-            "相关性", min_value=0, max_value=100, format="%d"
+            t("相关性", "Relevance"), min_value=0, max_value=100, format="%d"
         ),
         "报道质量": st.column_config.ProgressColumn(
-            "报道质量", min_value=0, max_value=100, format="%d"
+            t("报道质量", "Article quality"), min_value=0, max_value=100, format="%d"
         ),
-        "新闻摘要": st.column_config.TextColumn("新闻摘要", width="large"),
-        "量化案例": st.column_config.TextColumn("量化案例", width="large"),
-        "证据原文": st.column_config.TextColumn("证据原文", width="large"),
+        "新闻摘要": st.column_config.TextColumn(t("新闻摘要", "Summary"), width="large"),
+        "量化案例": st.column_config.TextColumn(t("量化案例", "Quantified cases"), width="large"),
+        "证据原文": st.column_config.TextColumn(t("证据原文", "Evidence quotes"), width="large"),
     }
+    return {**configs, **{localize(key): value for key, value in configs.items()}}
 
 
 def _excel_bytes(df: pd.DataFrame) -> bytes:
@@ -370,7 +382,7 @@ def _excel_bytes(df: pd.DataFrame) -> bytes:
                 )
             )
     buffer = io.BytesIO()
-    export_df.to_excel(buffer, index=False, engine="openpyxl")
+    localize_dataframe(export_df).to_excel(buffer, index=False, engine="openpyxl")
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -381,31 +393,33 @@ def _render_high_quality_results_table(summary: dict[str, Any]) -> None:
     if not isinstance(cases, list) or not cases:
         return
 
-    st.markdown("### 📊 本次高质量新闻数据表")
+    st.markdown(t("### 📊 本次高质量新闻数据表", "### 📊 Quality news from this search"))
     st.markdown(
-        '<p class="section-note">筛选达到质量门槛的新闻；可直接修改业务字段，'
-        "下载文件会使用修改后的内容。</p>",
+        t(
+            '<p class="section-note">筛选达到质量门槛的新闻；可直接修改业务字段，下载文件会使用修改后的内容。</p>',
+            '<p class="section-note">Filter articles by quality, edit their details, and download the edited results.</p>',
+        ),
         unsafe_allow_html=True,
     )
     run_key = str(summary.get("started_at") or "latest").replace(" ", "_")
     min_quality = st.slider(
-        "最低新闻质量",
+        t("最低新闻质量", "Minimum article quality"),
         min_value=0,
         max_value=100,
         value=HIGH_QUALITY_DEFAULT_THRESHOLD,
         step=5,
         key=f"high_quality_threshold_{run_key}",
-        help="默认展示 75 分及以上，即“质量良好”和“高质量”的新闻。",
+        help=t("默认展示 75 分及以上，即“质量良好”和“高质量”的新闻。", "Shows articles scoring 75 or higher by default, including good and high-quality articles."),
     )
     table_df = build_high_quality_results(summary, min_quality=min_quality)
     if table_df.empty:
-        st.info(f"本次没有新闻达到 {min_quality} 分的质量门槛。")
+        st.info(t("本次没有新闻达到 {score} 分的质量门槛。", "No articles in this search reached the quality threshold of {score}.").format(score=min_quality))
         return
 
     metric_cols = st.columns(3)
-    metric_cols[0].metric("高质量新闻", len(table_df))
-    metric_cols[1].metric("平均质量", f"{table_df['新闻质量'].mean():.0f}/100")
-    metric_cols[2].metric("平均相关性", f"{table_df['搜索相关性'].mean():.0f}/100")
+    metric_cols[0].metric(t("高质量新闻", "Quality articles"), len(table_df))
+    metric_cols[1].metric(t("平均质量", "Average quality"), f"{table_df['新闻质量'].mean():.0f}/100")
+    metric_cols[2].metric(t("平均相关性", "Average relevance"), f"{table_df['搜索相关性'].mean():.0f}/100")
 
     editable_columns = [
         "导出",
@@ -422,58 +436,80 @@ def _render_high_quality_results_table(summary: dict[str, Any]) -> None:
     disabled_columns = [
         column for column in table_df.columns if column not in editable_columns
     ]
+    editor_key = f"high_quality_editor_{run_key}_{min_quality}"
+    editor_data_key = f"{editor_key}_data"
+    editor_saved_key = f"{editor_key}_saved"
+    editor_language_key = f"{editor_key}_language"
+    if (
+        editor_data_key not in st.session_state
+        or st.session_state.get(editor_language_key) != get_language()
+    ):
+        st.session_state[editor_data_key] = st.session_state.get(
+            editor_saved_key, table_df
+        ).copy()
+        st.session_state[editor_language_key] = get_language()
+        st.session_state.pop(editor_key, None)
+    editor_display_df = st.session_state[editor_data_key].copy()
+    if "质量评级" in editor_display_df:
+        editor_display_df["质量评级"] = editor_display_df["质量评级"].map(localize)
     edited_df = st.data_editor(
-        table_df,
+        editor_display_df,
         width="stretch",
         hide_index=True,
         num_rows="fixed",
         row_height=72,
         disabled=disabled_columns,
-        key=f"high_quality_editor_{run_key}_{min_quality}",
+        key=editor_key,
         column_config={
+            **{column: st.column_config.Column(localize(column)) for column in table_df.columns},
             "导出": st.column_config.CheckboxColumn(
-                "导出", help="取消勾选后，该行不会进入下载文件。"
+                t("导出", "Export"), help=t("取消勾选后，该行不会进入下载文件。", "Uncheck to exclude this row from the download.")
             ),
             "原文链接": st.column_config.LinkColumn(
-                "原文链接", display_text="🔗 查看原文"
+                t("原文链接", "Source link"), display_text=t("🔗 查看原文", "🔗 Read article")
             ),
             "搜索相关性": st.column_config.ProgressColumn(
-                "搜索相关性", min_value=0, max_value=100, format="%d"
+                t("搜索相关性", "Search relevance"), min_value=0, max_value=100, format="%d"
             ),
             "新闻质量": st.column_config.ProgressColumn(
-                "新闻质量", min_value=0, max_value=100, format="%d"
+                t("新闻质量", "Article quality"), min_value=0, max_value=100, format="%d"
             ),
             "推荐分": st.column_config.ProgressColumn(
-                "推荐分", min_value=0, max_value=100, format="%d"
+                t("推荐分", "Recommendation score"), min_value=0, max_value=100, format="%d"
             ),
-            "新闻标题": st.column_config.TextColumn("新闻标题", width="large"),
-            "新闻摘要": st.column_config.TextColumn("新闻摘要", width="large"),
-            "量化案例": st.column_config.TextColumn("量化案例", width="large"),
-            "证据原文": st.column_config.TextColumn("证据原文", width="large"),
-            "编辑备注": st.column_config.TextColumn("编辑备注", width="medium"),
+            "新闻标题": st.column_config.TextColumn(t("新闻标题", "Article title"), width="large"),
+            "新闻摘要": st.column_config.TextColumn(t("新闻摘要", "Summary"), width="large"),
+            "量化案例": st.column_config.TextColumn(t("量化案例", "Quantified cases"), width="large"),
+            "证据原文": st.column_config.TextColumn(t("证据原文", "Evidence quotes"), width="large"),
+            "编辑备注": st.column_config.TextColumn(t("编辑备注", "Editor notes"), width="medium"),
         },
     )
+    if "质量评级" in edited_df:
+        edited_df["质量评级"] = table_df["质量评级"]
+    st.session_state[editor_saved_key] = edited_df.copy()
     export_df = selected_export_rows(edited_df)
     st.caption(
-        "可编辑：标题、摘要、主题、企业、地区、量化案例、证据、标签和备注。"
-        "分数、来源、时间及原文链接保持只读；编辑只用于本次下载，不覆盖数据库。"
+        t(
+            "可编辑：标题、摘要、主题、企业、地区、量化案例、证据、标签和备注。分数、来源、时间及原文链接保持只读；编辑只用于本次下载，不覆盖数据库。",
+            "Edit titles, summaries, topics, companies, regions, cases, evidence, tags, and notes. Scores, sources, dates, and links are read-only. Edits apply to this download without changing the database.",
+        )
     )
     if export_df.empty:
-        st.warning("请至少勾选一条新闻后再下载。")
+        st.warning(t("请至少勾选一条新闻后再下载。", "Select at least one article to download."))
         return
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     download_cols = st.columns(2)
     download_cols[0].download_button(
-        "📥 下载 Excel",
+        t("📥 下载 Excel", "📥 Download Excel"),
         data=_excel_bytes(export_df),
         file_name=f"high_quality_news_{timestamp}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         width="stretch",
     )
     download_cols[1].download_button(
-        "📄 下载 CSV",
-        data=csv_bytes(export_df),
+        t("📄 下载 CSV", "📄 Download CSV"),
+        data=csv_bytes(localize_dataframe(export_df)),
         file_name=f"high_quality_news_{timestamp}.csv",
         mime="text/csv",
         width="stretch",
@@ -483,52 +519,51 @@ def _render_high_quality_results_table(summary: dict[str, Any]) -> None:
 def _render_run_summary(summary: dict[str, Any]) -> None:
     """展示最近一次任务的分阶段统计和逐篇诊断信息。"""
     result_cols = st.columns(5)
-    result_cols[0].metric("提取正文", summary.get("processed", 0))
-    result_cols[1].metric("AI 成功", summary.get("analyzed", 0))
-    result_cols[2].metric("新闻新增", summary.get("news_saved", 0))
-    result_cols[3].metric("案例新增", summary.get("saved", 0))
+    result_cols[0].metric(t("提取正文", "Articles extracted"), summary.get("processed", 0))
+    result_cols[1].metric(t("AI 成功", "AI analyses completed"), summary.get("analyzed", 0))
+    result_cols[2].metric(t("新闻新增", "New articles"), summary.get("news_saved", 0))
+    result_cols[3].metric(t("案例新增", "New cases"), summary.get("saved", 0))
     failure_count = int(summary.get("analysis_failed", 0)) + int(
         summary.get("write_failed", 0)
     )
-    result_cols[4].metric("失败", failure_count)
+    result_cols[4].metric(t("失败", "Failures"), failure_count)
 
     st.caption(
-        f"未达案例门槛：{summary.get('unqualified', 0)} · "
-        f"旧记录更新：{summary.get('refreshed', 0)} · "
-        f"重复跳过：{summary.get('duplicates', 0)} · "
-        f"数据库写入失败：{summary.get('write_failed', 0)}"
+        t(
+            "未达案例门槛：{unqualified} · 旧记录更新：{refreshed} · 重复跳过：{duplicates} · 数据库写入失败：{write_failed}",
+            "Below case threshold: {unqualified} · Records updated: {refreshed} · Duplicates skipped: {duplicates} · Database write failures: {write_failed}",
+        ).format(**{key: summary.get(key, 0) for key in ("unqualified", "refreshed", "duplicates", "write_failed")})
     )
     timing_parts = []
     if summary.get("search_seconds") is not None:
-        timing_parts.append(f"新闻搜索 {summary['search_seconds']:.1f} 秒")
+        timing_parts.append(t("新闻搜索 {seconds:.1f} 秒", "News search: {seconds:.1f}s").format(seconds=summary["search_seconds"]))
     if summary.get("analysis_seconds") is not None:
-        timing_parts.append(f"AI 分析 {summary['analysis_seconds']:.1f} 秒")
+        timing_parts.append(t("AI 分析 {seconds:.1f} 秒", "AI analysis: {seconds:.1f}s").format(seconds=summary["analysis_seconds"]))
     if timing_parts:
-        st.caption("本次耗时：" + " · ".join(timing_parts))
+        st.caption(t("本次耗时：", "Elapsed time: ") + " · ".join(timing_parts))
 
     if summary.get("news_saved"):
         st.success(
-            f"已新增 {summary['news_saved']} 条新闻到新闻池，"
-            f"其中 {summary.get('saved', 0)} 条进入案例库。"
+            t("已新增 {news} 条新闻到新闻池，其中 {cases} 条进入案例库。", "Added {news} articles to the news pool; {cases} qualified for the case library.").format(news=summary["news_saved"], cases=summary.get("saved", 0))
         )
     elif summary.get("refreshed"):
         st.success(
-            f"已用当前评分规则更新 {summary['refreshed']} 条已有新闻。"
+            t("已用当前评分规则更新 {count} 条已有新闻。", "Updated {count} existing articles using the current scoring rules.").format(count=summary["refreshed"])
         )
     elif summary.get("processed") and not summary.get("analyzed"):
-        st.error("已提取新闻正文，但 AI 分析全部失败，请查看错误详情。")
+        st.error(t("已提取新闻正文，但 AI 分析全部失败，请查看错误详情。", "Article text was extracted, but all AI analyses failed. See the error details."))
     elif summary.get("write_failed"):
-        st.error("AI 分析已完成，但结果没有成功写入数据库。")
+        st.error(t("AI 分析已完成，但结果没有成功写入数据库。", "AI analysis completed, but the results could not be saved to the database."))
     elif summary.get("duplicates") and summary.get("duplicates") == summary.get("analyzed"):
-        st.info("分析结果均已存在，本次没有重复写入新闻池。")
+        st.info(t("分析结果均已存在，本次没有重复写入新闻池。", "All results already exist. No duplicate articles were saved."))
     elif summary.get("processed"):
-        st.warning("任务已完成，但本次没有新增新闻，请查看逐篇明细。")
+        st.warning(t("任务已完成，但本次没有新增新闻，请查看逐篇明细。", "The task completed without adding articles. See the article details."))
 
     errors = summary.get("errors", [])
     if errors:
-        with st.expander(f"错误详情（{len(errors)}）", expanded=True):
+        with st.expander(t("错误详情（{count}）", "Error details ({count})").format(count=len(errors)), expanded=True):
             for error in errors:
-                st.error(error)
+                st.error(localize(error))
 
     details = summary.get("details", [])
     if details:
@@ -543,19 +578,19 @@ def _render_run_summary(summary: dict[str, Any]) -> None:
                 "reason": "原因",
             }
         )
-        st.markdown("#### 本次逐篇处理明细")
+        st.markdown(t("#### 本次逐篇处理明细", "#### Article processing details"))
         st.dataframe(
-            details_df,
+            localize_dataframe(details_df),
             width="stretch",
             hide_index=True,
             column_config={
-                "原文链接": st.column_config.LinkColumn(
-                    "原文链接", display_text="🔗 查看原文"
+                localize("原文链接"): st.column_config.LinkColumn(
+                    t("原文链接", "Source link"), display_text=t("🔗 查看原文", "🔗 Read article")
                 ),
-                "相关性": st.column_config.ProgressColumn(
-                    "相关性", min_value=0, max_value=100, format="%d"
+                localize("相关性"): st.column_config.ProgressColumn(
+                    t("相关性", "Relevance"), min_value=0, max_value=100, format="%d"
                 ),
-                "原因": st.column_config.TextColumn("原因", width="large"),
+                localize("原因"): st.column_config.TextColumn(t("原因", "Reason"), width="large"),
             },
         )
     _render_high_quality_results_table(summary)
@@ -590,53 +625,53 @@ def _render_score_breakdown(quality_details: dict) -> None:
         score = bounded_scores[key]
         reason = dim_reasons.get(key, "")
         if score > 0 or reason:
-            items.append(f"{label}（{score}/{maximum}）")
+            items.append(t("{label}（{score}/{maximum}）", "{label} ({score}/{maximum})").format(label=localize(label), score=score, maximum=maximum))
     total_deduction = sum(p.get("deduction", 0) for p in penalties)
 
-    formula_parts = " + ".join(items) if items else "无维度数据"
+    formula_parts = " + ".join(items) if items else t("无维度数据", "No dimension scores")
     if total_deduction > 0:
-        formula_parts += f" — 扣分（{total_deduction}分）"
+        formula_parts += t(" — 扣分（{points}分）", " − deductions ({points} points)").format(points=total_deduction)
     base_score = sum(
         bounded_scores[key] for key in BASE_QUALITY_DIMENSIONS
     )
     if is_pre_score:
         pre_score = max(0, min(50, int(adjusted or 0)))
-        st.markdown(f"#### 基础分 {pre_score}/50")
-        st.caption("基础评分已完成；AI 分析完成后会再生成 50 分正文质量分。")
+        st.markdown(t("#### 基础分 {score}/50", "#### Base score {score}/50").format(score=pre_score))
+        st.caption(t("基础评分已完成；AI 分析完成后会再生成 50 分正文质量分。", "Base scoring is complete. AI analysis will add up to 50 points for article content quality."))
     else:
         body_score = sum(
             bounded_scores[key] for key in BODY_QUALITY_DIMENSIONS
         )
         adjusted = max(0, min(100, int(adjusted or 0)))
-        heading = f"综合质量 {adjusted}/100"
+        heading = t("综合质量 {score}/100", "Overall quality {score}/100").format(score=adjusted)
         if quality_label:
-            heading += f" · {quality_label}"
+            heading += f" · {localize(quality_label)}"
         st.markdown(f"####  {heading}")
-        equation = f"基础分 {base_score}/50 + AI 正文质量 {body_score}/50"
+        equation = t("基础分 {base}/50 + AI 正文质量 {body}/50", "Base score {base}/50 + AI content quality {body}/50").format(base=base_score, body=body_score)
         if total_deduction > 0:
-            equation += f" - 扣分 {total_deduction}"
+            equation += t(" - 扣分 {points}", " − deductions {points}").format(points=total_deduction)
         score_cap = max(
             0,
             min(100, int(quality_details.get("score_cap", 100) or 100)),
         )
         if score_cap < 100:
-            equation += f"，规则封顶 {score_cap}"
+            equation += t("，规则封顶 {cap}", ", rule cap {cap}").format(cap=score_cap)
         st.markdown(
-            f"**{equation} = 综合质量 {adjusted}/100**"
+            t("**{equation} = 综合质量 {score}/100**", "**{equation} = overall quality {score}/100**").format(equation=equation, score=adjusted)
         )
-    st.caption(f"计算方式：{formula_parts}")
+    st.caption(t("计算方式：{formula}", "Calculation: {formula}").format(formula=formula_parts))
     for warning in quality_warnings:
-        st.warning(str(warning))
+        st.warning(localize(str(warning)))
 
     for key, (label, maximum) in dimensions.items():
         score = bounded_scores[key]
         reason = dim_reasons.get(key, "")
         if score > 0 or reason:
-            st.markdown(f"**{label}：{score}/{maximum} 分**")
+            st.markdown(t("**{label}：{score}/{maximum} 分**", "**{label}: {score}/{maximum} points**").format(label=localize(label), score=score, maximum=maximum))
             if reason:
-                st.caption(reason)
+                st.caption(localize(reason))
     for penalty in penalties:
-        st.caption(f"⚠️ 扣分 {penalty.get('deduction', 0)}：{penalty.get('reason', '')}")
+        st.caption(t("⚠️ 扣分 {points}：{reason}", "⚠️ Deduction {points}: {reason}").format(points=penalty.get("deduction", 0), reason=localize(penalty.get("reason", ""))))
 
 
 def _render_search_relevance(
@@ -654,7 +689,7 @@ def _render_search_relevance(
         article.get("search_relevance_reason")
         or (result or {}).get("relevance_reason", "")
     )
-    st.markdown(f"#### 🎯 搜索相关性 {relevance}/100")
+    st.markdown(t("#### 🎯 搜索相关性 {score}/100", "#### 🎯 Search relevance {score}/100").format(score=relevance))
     dimensions = article.get("search_relevance_dimensions")
     if not isinstance(dimensions, dict) and result:
         quality_details = result.get("quality_details")
@@ -664,12 +699,12 @@ def _render_search_relevance(
         dimension_parts = []
         for key, (label, maximum) in SEARCH_RELEVANCE_DIMENSIONS.items():
             score = _bounded_dimension_score(dimensions.get(key), maximum)
-            dimension_parts.append(f"{label} {score}/{maximum}")
-            st.markdown(f"**{label}：{score}/{maximum} 分**")
-        st.caption("计算方式：" + " + ".join(dimension_parts))
+            dimension_parts.append(f"{localize(label)} {score}/{maximum}")
+            st.markdown(t("**{label}：{score}/{maximum} 分**", "**{label}: {score}/{maximum} points**").format(label=localize(label), score=score, maximum=maximum))
+        st.caption(t("计算方式：", "Calculation: ") + " + ".join(dimension_parts))
     if reason:
-        st.caption(reason)
-    st.caption("搜索相关性用于筛选和排序，不计入新闻质量基础分 50 分。")
+        st.caption(localize(reason))
+    st.caption(t("搜索相关性用于筛选和排序，不计入新闻质量基础分 50 分。", "Search relevance controls filtering and ranking. It is separate from the 50-point quality base score."))
 
 
 def _quality_value(quality: Any, key: str, default: Any = None) -> Any:
@@ -931,40 +966,42 @@ def _render_article_cards(
         if result.get("analysis_status") == "跳过"
     )
 
-    st.markdown(f"### 📰 已搜索到的文章（{len(articles)}篇）")
+    st.markdown(t("### 📰 已搜索到的文章（{count}篇）", "### 📰 Articles found ({count})").format(count=len(articles)))
     intent = st.session_state.get("fetched_search_intent", {})
     if isinstance(intent, dict) and intent.get("intent_summary"):
         if intent.get("used_fallback"):
             st.warning(
-                "AI 搜索意图理解未成功，本次已降级为原始中文关键词搜索。"
-                "英文检索词只会在 AI 成功生成或你手动填写时使用。"
+                t(
+                    "AI 搜索意图理解未成功，本次已降级为原始中文关键词搜索。英文检索词只会在 AI 成功生成或你手动填写时使用。",
+                    "AI search intent analysis failed. This search uses the original Chinese keywords. English queries are used only when generated successfully or entered manually.",
+                )
             )
             fallback_reason = str(intent.get("fallback_reason", "")).strip()
             if fallback_reason:
-                st.caption(f"降级原因：{fallback_reason}")
-        st.info(f"🧠 AI 理解的搜索目标：{intent['intent_summary']}")
-        with st.expander("查看本次中英文检索策略"):
+                st.caption(t("降级原因：{reason}", "Fallback reason: {reason}").format(reason=localize(fallback_reason)))
+        st.info(t("🧠 AI 理解的搜索目标：{intent}", "🧠 AI interpretation of your search: {intent}").format(intent=intent["intent_summary"]))
+        with st.expander(t("查看本次中英文检索策略", "View Chinese and English search strategy")):
             selected_intents = intent.get("selected_intents", []) or []
             target_topics = intent.get("target_topics", []) or []
             chinese_queries = intent.get("chinese_queries", []) or []
             english_queries = intent.get("english_queries", []) or []
             relevance_criteria = intent.get("relevance_criteria", []) or []
             if selected_intents:
-                st.markdown("**已选择的细分意图：**")
+                st.markdown(t("**已选择的细分意图：**", "**Selected search directions:**"))
                 for selected_intent in selected_intents:
                     if isinstance(selected_intent, dict):
                         st.markdown(
-                            f"- {selected_intent.get('label', '检索方向')}："
+                            f"- {selected_intent.get('label', t('检索方向', 'Search direction'))}: "
                             f"{selected_intent.get('intent_summary', '')}"
                         )
             if target_topics:
-                st.markdown("**目标主题：**" + " · ".join(map(str, target_topics)))
+                st.markdown(t("**目标主题：**", "**Target topics:** ") + " · ".join(map(str, target_topics)))
             if chinese_queries:
-                st.markdown("**中文检索词：**" + " · ".join(map(str, chinese_queries)))
+                st.markdown(t("**中文检索词：**", "**Chinese queries:** ") + " · ".join(map(str, chinese_queries)))
             if english_queries:
-                st.markdown("**英文检索词：**" + " · ".join(map(str, english_queries)))
+                st.markdown(t("**英文检索词：**", "**English queries:** ") + " · ".join(map(str, english_queries)))
             if relevance_criteria:
-                st.markdown("**相关性判断标准：**")
+                st.markdown(t("**相关性判断标准：**", "**Relevance criteria:**"))
                 for criterion in relevance_criteria:
                     st.markdown(f"- {criterion}")
     if results:
@@ -976,30 +1013,34 @@ def _render_article_cards(
                 require_body=True,
             )
         ]
-        summary_parts = [f"已完成 AI 分析 {analyzed_count}/{len(articles)} 篇"]
+        summary_parts = [t("已完成 AI 分析 {completed}/{total} 篇", "AI analysis completed: {completed}/{total}").format(completed=analyzed_count, total=len(articles))]
         if relevance_skipped_count:
             summary_parts.append(
-                f"相关性不足跳过 {relevance_skipped_count} 篇"
+                t("相关性不足跳过 {count} 篇", "Skipped for low relevance: {count}").format(count=relevance_skipped_count)
             )
         if current_pre_scores:
             summary_parts.append(
-                f"基础均分 {sum(current_pre_scores) // len(current_pre_scores)}/50"
+                t("基础均分 {score}/50", "Average base score: {score}/50").format(score=sum(current_pre_scores) // len(current_pre_scores))
             )
         if current_final_scores:
             summary_parts.append(
-                f"综合质量均分 {sum(current_final_scores) // len(current_final_scores)}/100"
+                t("综合质量均分 {score}/100", "Average overall quality: {score}/100").format(score=sum(current_final_scores) // len(current_final_scores))
             )
         st.caption(" · ".join(summary_parts))
     else:
         if len(current_pre_scores) == len(articles):
             st.caption(
-                "搜索相关性与来源权威度 AI 初筛已完成，基础分已生成；"
-                "正文质量分析会继续进行。"
+                t(
+                    "搜索相关性与来源权威度 AI 初筛已完成，基础分已生成；正文质量分析会继续进行。",
+                    "AI relevance and source screening is complete. Base scores are ready; content quality analysis will continue.",
+                )
             )
         else:
             st.caption(
-                "新闻已搜索到，可以先浏览标题和原文；"
-                "AI 将先评估搜索相关性与来源权威度。"
+                t(
+                    "新闻已搜索到，可以先浏览标题和原文；AI 将先评估搜索相关性与来源权威度。",
+                    "Articles are ready to browse. AI will first assess search relevance and source credibility.",
+                )
             )
 
     for idx, article in enumerate(articles):
@@ -1024,11 +1065,13 @@ def _render_article_cards(
             quality_json,
             require_body=True,
         )
-        title = article.get("title", "无标题")
-        source = article.get("source", "未知来源")
+        title = article.get("title", t("无标题", "Untitled"))
+        source = article.get("source", t("未知来源", "Unknown source"))
+        if source == "未知来源":
+            source = t("未知来源", "Unknown source")
         url = article.get("url", "#")
         published = str(article.get("published_at", ""))[:16]
-        language_label = " · 🌐 英文" if article.get("language") == "en" else ""
+        language_label = t(" · 🌐 英文", " · 🌐 English") if article.get("language") == "en" else ""
         source_score = int(pre_dims.get("source_credibility", 0) or 0)
         relevance = article.get("search_relevance_score")
         if relevance is None and result:
@@ -1036,9 +1079,9 @@ def _render_article_cards(
         source_label = ""
         if has_current_pre_score:
             if source_score >= 22:
-                source_label = " · 🛡️ AI 评估：权威来源"
+                source_label = t(" · 🛡️ AI 评估：权威来源", " · 🛡️ AI assessment: authoritative source")
             elif source_score >= 15:
-                source_label = " · AI 评估：主流来源"
+                source_label = t(" · AI 评估：主流来源", " · AI assessment: mainstream source")
 
         with st.container(border=True):
             cols = st.columns([3, 1])
@@ -1046,58 +1089,58 @@ def _render_article_cards(
                 st.markdown(f"**{title[:80]}**")
                 st.caption(f"{source} · {published}{language_label}{source_label}")
                 if url and url != "#":
-                    st.markdown(f"[🔗 查看原文]({url})")
+                    st.markdown(t("[🔗 查看原文]({url})", "[🔗 Read article]({url})").format(url=url))
                 summary_text = ""
                 summary_label = ""
                 if result and result.get("summary"):
                     summary_text = str(result["summary"])
-                    summary_label = "AI 摘要"
+                    summary_label = t("AI 摘要", "AI summary")
                 elif article.get("content"):
                     summary_text = " ".join(str(article["content"]).split())[:180]
                     if len(str(article["content"])) > 180:
                         summary_text += "…"
-                    summary_label = "正文速览"
+                    summary_label = t("正文速览", "Article preview")
                 if summary_text:
                     st.markdown(f"**📝 {summary_label}**")
                     st.write(summary_text)
             with cols[1]:
                 if result:
                     relevance_score = _bounded_dimension_score(relevance, 100)
-                    st.metric("搜索相关性", f"{relevance_score}/100")
+                    st.metric(t("搜索相关性", "Search relevance"), f"{relevance_score}/100")
                     if has_current_final_score:
                         quality = _bounded_dimension_score(
                             result.get("quality_score"),
                             100,
                         )
                         label = result.get("quality_label", "")
-                        st.metric("综合质量", f"{quality}/100", label)
+                        st.metric(t("综合质量", "Overall quality"), f"{quality}/100", localize(label))
                         recommendation = _bounded_dimension_score(
                             result.get("recommendation_score"),
                             100,
                         )
-                        st.metric("推荐分", f"{recommendation}/100")
+                        st.metric(t("推荐分", "Recommendation score"), f"{recommendation}/100")
                     elif has_current_pre_score:
-                        st.metric("基础分", f"{pre_score}/50")
-                        st.caption("正文 AI 分析未完成，保留基础评分")
+                        st.metric(t("基础分", "Base score"), f"{pre_score}/50")
+                        st.caption(t("正文 AI 分析未完成，保留基础评分", "Content analysis is incomplete; showing the base score."))
                     status = result.get("analysis_status", "?")
                     store = result.get("storage_status", "?")
-                    st.caption(f"AI: {status} | 写入: {store}")
+                    st.caption(t("AI: {status} | 写入: {store}", "AI: {status} | Saved: {store}").format(status=localize(status), store=localize(store)))
                 else:
                     st.markdown(
-                        '<div class="article-found-status">✓ 已搜索到</div>',
+                        t('<div class="article-found-status">✓ 已搜索到</div>', '<div class="article-found-status">✓ Article found</div>'),
                         unsafe_allow_html=True,
                     )
                     if has_current_pre_score:
-                        st.metric("基础分", f"{pre_score}/50")
-                        st.caption("AI 正文质量分析中…")
+                        st.metric(t("基础分", "Base score"), f"{pre_score}/50")
+                        st.caption(t("AI 正文质量分析中…", "AI is assessing content quality…"))
                         if relevance is not None:
                             st.metric(
-                                "搜索相关性",
+                                t("搜索相关性", "Search relevance"),
                                 f"{_bounded_dimension_score(relevance, 100)}/100",
                             )
                     elif is_current_pre_version:
-                        st.metric("基础分", "计算中")
-                        st.caption("AI 正在评估搜索相关性与来源权威度…")
+                        st.metric(t("基础分", "Base score"), t("计算中", "Calculating"))
+                        st.caption(t("AI 正在评估搜索相关性与来源权威度…", "AI is assessing search relevance and source credibility…"))
 
             if (
                 result
@@ -1110,7 +1153,7 @@ def _render_article_cards(
                 )
                 quality_label = result.get("quality_label", "")
                 expander_label = (
-                    f" 查看完整评分｜{quality_score}/100 · {quality_label}"
+                    t(" 查看完整评分｜{score}/100 · {label}", "View full score | {score}/100 · {label}").format(score=quality_score, label=localize(quality_label))
                 )
                 with st.expander(expander_label):
                     _render_search_relevance(article, result)
@@ -1118,22 +1161,22 @@ def _render_article_cards(
                         result.get("recommendation_score"),
                         100,
                     )
-                    st.markdown(f"**推荐分 {recommendation}/100**")
-                    st.caption("推荐分 = 搜索相关性 × 70% + 综合质量 × 30%")
+                    st.markdown(t("**推荐分 {score}/100**", "**Recommendation score {score}/100**").format(score=recommendation))
+                    st.caption(t("推荐分 = 搜索相关性 × 70% + 综合质量 × 30%", "Recommendation score = search relevance × 70% + overall quality × 30%"))
                     if isinstance(quality_json, dict):
                         _render_score_breakdown(quality_json)
                     else:
-                        st.caption("暂无评分明细")
+                        st.caption(t("暂无评分明细", "Score breakdown unavailable"))
                     reason = result.get("reason", "")
                     if reason:
-                        st.caption(f"判定理由：{reason}")
+                        st.caption(t("判定理由：{reason}", "Decision reason: {reason}").format(reason=localize(reason)))
             elif has_current_pre_score:
-                with st.expander(f" 查看基础评分｜{pre_score}/50"):
+                with st.expander(t(" 查看基础评分｜{score}/50", "View base score | {score}/50").format(score=pre_score)):
                     _render_search_relevance(article, result)
                     if pre_dims:
                         _render_score_breakdown(pre_state)
                     else:
-                        st.caption("暂无评分明细")
+                        st.caption(t("暂无评分明细", "Score breakdown unavailable"))
 
 
 
@@ -1195,8 +1238,8 @@ def _render_active_search_task(task_id: str) -> None:
     """自动轮询后台搜索；切换管理台不会销毁该 fragment 之外的任务。"""
     snapshot = get_background_search(task_id)
     if snapshot is None:
-        st.error("后台搜索任务已不存在，可能是应用进程重新启动。")
-        if st.button("清除失效任务", key=f"clear_missing_task_{task_id}"):
+        st.error(t("后台搜索任务已不存在，可能是应用进程重新启动。", "This background task is no longer available. The application may have restarted."))
+        if st.button(t("清除失效任务", "Clear unavailable task"), key=f"clear_missing_task_{task_id}"):
             _clear_active_search_task()
             st.rerun()
         return
@@ -1205,25 +1248,25 @@ def _render_active_search_task(task_id: str) -> None:
         _apply_completed_search_task(snapshot)
         st.rerun()
     if status == "failed":
-        st.error(f"后台搜索失败：{snapshot.get('error') or snapshot.get('message')}")
-        if st.button("关闭失败任务", key=f"clear_failed_task_{task_id}"):
+        st.error(t("后台搜索失败：{error}", "Background search failed: {error}").format(error=localize(snapshot.get('error') or snapshot.get('message'))))
+        if st.button(t("关闭失败任务", "Dismiss failed task"), key=f"clear_failed_task_{task_id}"):
             _clear_active_search_task()
             st.rerun()
         return
 
     stage_labels = {
-        "queued": "任务排队",
-        "search": "搜索与正文提取",
-        "source": "相关性与来源初筛",
-        "body": "正文质量分析",
+        "queued": t("任务排队", "Queued"),
+        "search": t("搜索与正文提取", "Search and content extraction"),
+        "source": t("相关性与来源初筛", "Relevance and source screening"),
+        "body": t("正文质量分析", "Content quality analysis"),
     }
     stage = str(snapshot.get("stage") or "queued")
-    st.markdown(f"### ⏳ 后台任务 · {stage_labels.get(stage, stage)}")
+    st.markdown(t("### ⏳ 后台任务 · {stage}", "### ⏳ Background task · {stage}").format(stage=stage_labels.get(stage, stage)))
     st.progress(
         float(snapshot.get("progress", 0.0) or 0.0),
-        text=str(snapshot.get("message") or "后台任务运行中…"),
+        text=localize(str(snapshot.get("message") or "后台任务运行中…")),
     )
-    st.caption("你可以进入管理台查看其他数据；搜索和 AI 分析会继续运行。")
+    st.caption(t("你可以进入管理台查看其他数据；搜索和 AI 分析会继续运行。", "You can open the admin console while search and AI analysis continue."))
     articles = list(snapshot.get("articles") or [])
     if articles:
         _render_article_cards(
@@ -1240,21 +1283,20 @@ def _render_background_task_banner() -> None:
         return
     snapshot = get_background_search(task_id)
     if snapshot is None:
-        st.warning("先前的搜索任务已失效，请返回搜索页重新发起。")
+        st.warning(t("先前的搜索任务已失效，请返回搜索页重新发起。", "The previous task is no longer available. Return to search to start again."))
         return
     status = str(snapshot.get("status") or "running")
     if status == "running":
         st.info(
-            f"后台搜索仍在运行：{snapshot.get('message', '')} "
-            "你可以继续使用管理台。"
+            t("后台搜索仍在运行：{message} 你可以继续使用管理台。", "Search is still running: {message} You can keep using the admin console.").format(message=localize(snapshot.get('message', '')))
         )
         st.progress(float(snapshot.get("progress", 0.0) or 0.0))
     elif status == "completed":
-        st.success("后台搜索和 AI 分析已经完成，返回搜索页即可查看结果。")
+        st.success(t("后台搜索和 AI 分析已经完成，返回搜索页即可查看结果。", "Search and AI analysis are complete. Return to search to view the results."))
     else:
-        st.error(f"后台搜索失败：{snapshot.get('error', '')}")
+        st.error(t("后台搜索失败：{error}", "Background search failed: {error}").format(error=localize(snapshot.get('error', ''))))
     st.button(
-        "返回搜索查看任务",
+        t("返回搜索查看任务", "Return to search"),
         key="management_open_search_task",
         on_click=_set_active_view,
         args=("search",),
@@ -1262,37 +1304,41 @@ def _render_background_task_banner() -> None:
 
 
 def _render_news_pool() -> None:
-    st.markdown('<p class="section-title">已分析新闻</p>', unsafe_allow_html=True)
+    st.markdown(t("<p class=\"section-title\">已分析新闻</p>", "<p class=\"section-title\">Analyzed news</p>"), unsafe_allow_html=True)
     st.markdown(
-        '<p class="section-note">按主题、审核状态或相关性快速缩小范围。</p>',
+        t("<p class=\"section-note\">按主题、审核状态或相关性快速缩小范围。</p>", "<p class=\"section-note\">Filter by topic, review status, or relevance.</p>"),
         unsafe_allow_html=True,
     )
     news_df = _enrich_with_quality(load_cases())
     filter_cols = st.columns([1, 1, 1, 1])
     topic_filter = filter_cols[0].selectbox(
-        "主题筛选",
+        t("主题筛选", "Topic filter"),
         ["全部"] + sorted(news_df["topic_name"].dropna().unique().tolist())
         if not news_df.empty
         else ["全部"],
         key="news_topic_filter",
+        format_func=label_formatter(),
     )
     status_filter = filter_cols[1].selectbox(
-        "审核状态",
+        t("审核状态", "Review status"),
         ["全部", "待审核", "已确认", "已忽略", "低相关"],
         key="news_status_filter",
+        format_func=label_formatter(),
     )
     score_filter = filter_cols[2].number_input(
-        "最低相关性", min_value=0, max_value=100, value=0, step=5
+        t("最低相关性", "Minimum relevance"), min_value=0, max_value=100, value=0, step=5,
+        key="news_score_filter",
     )
     news_sort = filter_cols[3].selectbox(
-        "排序方式",
+        t("排序方式", "Sort by"),
         ["最新发布", "最早发布", "质量最高", "质量最低"],
         key="news_sort",
+        format_func=label_formatter(),
     )
 
     filtered_news = news_df.copy()
     if filtered_news.empty:
-        st.info("还没有历史新闻。完成第一次搜索后，分析结果会自动出现在这里。")
+        st.info(t("还没有历史新闻。完成第一次搜索后，分析结果会自动出现在这里。", "No articles yet. Results will appear here after your first search."))
         return
 
     if topic_filter != "全部":
@@ -1317,39 +1363,41 @@ def _render_news_pool() -> None:
         "相关性", "入库判定", "审核状态", "原文链接",
     ]
     st.dataframe(
-        news_display[[col for col in news_columns if col in news_display.columns]],
+        localize_dataframe(news_display[[col for col in news_columns if col in news_display.columns]]),
         width="stretch",
         hide_index=True,
         column_config=_table_config(),
     )
-    st.caption(f"共 {len(filtered_news)} 条新闻")
+    st.caption(t("共 {count} 条新闻", "{count} articles").format(count=len(filtered_news)))
 
 
 def _render_case_library(allow_review: bool = False) -> None:
-    st.markdown('<p class="section-title">量化案例</p>', unsafe_allow_html=True)
+    st.markdown(t("<p class=\"section-title\">量化案例</p>", "<p class=\"section-title\">Quantified cases</p>"), unsafe_allow_html=True)
     st.markdown(
-        '<p class="section-note">只展示达到入库门槛且包含可核验量化信息的新闻。</p>',
+        t("<p class=\"section-note\">只展示达到入库门槛且包含可核验量化信息的新闻。</p>", "<p class=\"section-note\">News that meets the inclusion threshold and contains verifiable quantitative information.</p>"),
         unsafe_allow_html=True,
     )
     cases_df = _enrich_with_quality(load_cases(qualified_only=True))
     if cases_df.empty:
-        st.info("暂无达标案例。可以降低搜索页的入库门槛，或尝试更具体的关键词。")
+        st.info(t("暂无达标案例。可以降低搜索页的入库门槛，或尝试更具体的关键词。", "No qualified cases yet. Try a lower inclusion threshold or more specific keywords."))
         return
 
     key_prefix = "review" if allow_review else "browse"
     case_filters = st.columns([2, 2, 2])
     case_topic = case_filters[0].selectbox(
-        "案例主题",
+        t("案例主题", "Case topic"),
         ["全部"] + sorted(cases_df["topic_name"].dropna().unique().tolist()),
         key=f"{key_prefix}_case_topic_filter",
+        format_func=label_formatter(),
     )
     case_status = case_filters[1].selectbox(
-        "案例状态",
+        t("案例状态", "Case status"),
         ["全部", "待审核", "已确认", "已忽略"],
         key=f"{key_prefix}_case_status_filter",
+        format_func=label_formatter(),
     )
     company_query = case_filters[2].text_input(
-        "企业关键词", key=f"{key_prefix}_company_query"
+        t("企业关键词", "Company keyword"), key=f"{key_prefix}_company_query"
     )
     filtered_cases = cases_df.copy()
     if case_topic != "全部":
@@ -1369,7 +1417,7 @@ def _render_case_library(allow_review: bool = False) -> None:
         "量化案例", "证据原文", "相关性", "审核状态", "原文链接",
     ]
     st.dataframe(
-        case_display[[col for col in case_columns if col in case_display.columns]],
+        localize_dataframe(case_display[[col for col in case_columns if col in case_display.columns]]),
         width="stretch",
         hide_index=True,
         column_config=_table_config(),
@@ -1384,22 +1432,23 @@ def _render_case_library(allow_review: bool = False) -> None:
         if case_options:
             action_col, status_col, button_col = st.columns([5, 2, 1])
             selected_case_label = action_col.selectbox(
-                "选择要审核的案例", list(case_options), key="review_case"
+                t("选择要审核的案例", "Select a case to review"), list(case_options), key="review_case"
             )
             selected_status = status_col.selectbox(
-                "更新为", ["已确认", "待审核", "已忽略"], key="review_status"
+                t("更新为", "Set status"), ["已确认", "待审核", "已忽略"], key="review_status",
+                format_func=label_formatter(),
             )
             with button_col:
                 st.write("")
                 st.write("")
-                if st.button("保存", width="stretch", key="save_review"):
+                if st.button(t("保存", "Save"), width="stretch", key="save_review"):
                     update_case_review_status(
                         case_options[selected_case_label], selected_status
                     )
                     st.rerun()
 
     st.download_button(
-        "📥 导出当前结果",
+        t("📥 导出当前结果", "📥 Export current results"),
         data=_excel_bytes(filtered_cases),
         file_name=export_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1418,28 +1467,28 @@ def _render_dashboard() -> None:
     )
     covered_topics = int(all_news["topic_id"].nunique()) if not all_news.empty else 0
     metric_cols = st.columns(4)
-    metric_cols[0].metric("新闻总量", len(all_news))
-    metric_cols[1].metric("达标案例", len(qualified_news))
-    metric_cols[2].metric("待审核", pending_count)
-    metric_cols[3].metric("主题覆盖", f"{covered_topics} / 28")
+    metric_cols[0].metric(t("新闻总量", "Total articles"), len(all_news))
+    metric_cols[1].metric(t("达标案例", "Qualified cases"), len(qualified_news))
+    metric_cols[2].metric(t("待审核", "Pending review"), pending_count)
+    metric_cols[3].metric(t("主题覆盖", "Topic coverage"), f"{covered_topics} / 28")
 
     if all_news.empty:
-        st.info("暂无数据。返回搜索首页完成第一次新闻搜索即可开始积累。")
+        st.info(t("暂无数据。返回搜索首页完成第一次新闻搜索即可开始积累。", "No data yet. Run your first search to start collecting articles."))
         return
 
     left, right = st.columns([2, 3])
     with left:
-        st.markdown("#### 主题覆盖")
+        st.markdown(t("#### 主题覆盖", "#### Topic coverage"))
         topic_counts = (
             all_news.groupby("topic_name").size().sort_values(ascending=False).head(12)
         )
         st.bar_chart(topic_counts, horizontal=True)
     with right:
-        st.markdown("#### 最近发现")
+        st.markdown(t("#### 最近发现", "#### Recently found"))
         recent_cols = ["发现时间", "新闻标题", "研究主题", "相关性", "原文链接"]
         recent_df = _display_cases(_enrich_with_quality(all_news).head(8))
         st.dataframe(
-            recent_df[[col for col in recent_cols if col in recent_df.columns]],
+            localize_dataframe(recent_df[[col for col in recent_cols if col in recent_df.columns]]),
             width="stretch",
             hide_index=True,
             column_config=_table_config(),
@@ -1447,10 +1496,9 @@ def _render_dashboard() -> None:
 
 
 def _render_topic_management() -> None:
-    st.markdown("#### 研究主题配置")
+    st.markdown(t("#### 研究主题配置", "#### Research topic settings"))
     st.caption(
-        "控制周期采集使用的关键词、启用状态、入库门槛和篇数。"
-        "修改只写入数据库，不会改动原始 Excel。"
+        t("控制周期采集使用的关键词、启用状态、入库门槛和篇数。修改只写入数据库，不会改动原始 Excel。", "Set the keywords, active status, inclusion threshold, and article limit for scheduled collection. Changes are saved to the database; the original Excel file is unchanged.")
     )
     editable_topics = load_topics(include_custom=False)
     editable_columns = [
@@ -1458,32 +1506,44 @@ def _render_topic_management() -> None:
         "search_keywords", "enabled", "min_score", "max_articles",
         "collection_interval_hours",
     ]
+    # Column labels affect the editor's widget identity. Keep the edited data
+    # separately so changing the interface language cannot discard a draft.
+    if (
+        "topics_editor_data" not in st.session_state
+        or st.session_state.get("topics_editor_language") != get_language()
+    ):
+        st.session_state.topics_editor_data = st.session_state.get(
+            "topics_editor_draft", editable_topics[editable_columns]
+        ).copy()
+        st.session_state.topics_editor_language = get_language()
+        st.session_state.pop("topics_editor", None)
     edited_topics = st.data_editor(
-        editable_topics[editable_columns],
+        st.session_state.topics_editor_data,
         width="stretch",
         hide_index=True,
         disabled=["topic_id", "dimension", "category", "topic_name", "report_frequency"],
         column_config={
-            "topic_id": "主题 ID",
-            "dimension": "维度",
-            "category": "分类",
-            "topic_name": "研究主题",
-            "report_frequency": "报告频率",
-            "search_keywords": st.column_config.TextColumn("新闻搜索词", width="large"),
-            "enabled": st.column_config.CheckboxColumn("启用"),
+            "topic_id": t("主题 ID", "Topic ID"),
+            "dimension": t("维度", "Dimension"),
+            "category": t("分类", "Category"),
+            "topic_name": t("研究主题", "Research topic"),
+            "report_frequency": t("报告频率", "Report frequency"),
+            "search_keywords": st.column_config.TextColumn(t("新闻搜索词", "News search keywords"), width="large"),
+            "enabled": st.column_config.CheckboxColumn(t("启用", "Enabled")),
             "min_score": st.column_config.NumberColumn(
-                "入库分数", min_value=0, max_value=100
+                t("入库分数", "Inclusion score"), min_value=0, max_value=100
             ),
             "max_articles": st.column_config.NumberColumn(
-                "单次篇数", min_value=1, max_value=30
+                t("单次篇数", "Articles per run"), min_value=1, max_value=30
             ),
             "collection_interval_hours": st.column_config.NumberColumn(
-                "采集间隔/小时", min_value=1
+                t("采集间隔/小时", "Collection interval (hours)"), min_value=1
             ),
         },
         key="topics_editor",
     )
-    if st.button("💾 保存主题配置", type="primary"):
+    st.session_state.topics_editor_draft = edited_topics.copy()
+    if st.button(t("💾 保存主题配置", "💾 Save topic settings"), type="primary", key="save_topic_settings"):
         for row in edited_topics.to_dict(orient="records"):
             update_topic(
                 str(row["topic_id"]),
@@ -1495,32 +1555,32 @@ def _render_topic_management() -> None:
                     "collection_interval_hours": row["collection_interval_hours"],
                 },
             )
-        st.success("主题配置已保存。")
+        st.success(t("主题配置已保存。", "Topic settings saved."))
 
 
 def _render_task_center(cloud_demo: bool) -> None:
-    st.markdown("#### 任务状态与运行日志")
+    st.markdown(t("#### 任务状态与运行日志", "#### Task status and run history"))
     health_cols = st.columns(3)
     if cloud_demo:
-        health_cols[0].metric("运行模式", "Cloud 展示")
-        health_cols[1].metric("定时 Worker", "未启用")
-        health_cols[2].metric("数据持久化", "临时")
-        st.info("云端展示版支持手动搜索，不运行后台定时任务。")
+        health_cols[0].metric(t("运行模式", "Run mode"), t("Cloud 展示", "Cloud demo"))
+        health_cols[1].metric(t("定时 Worker", "Scheduled worker"), t("未启用", "Disabled"))
+        health_cols[2].metric(t("数据持久化", "Data persistence"), t("临时", "Temporary"))
+        st.info(t("云端展示版支持手动搜索，不运行后台定时任务。", "The cloud demo supports manual search. Scheduled collection is disabled."))
     else:
         current_health = get_scheduler_health()
         health_cols[0].metric(
-            "Worker 状态", "运行中" if current_health["running"] else "未运行"
+            t("Worker 状态", "Worker status"), t("运行中", "Running") if current_health["running"] else t("未运行", "Stopped")
         )
-        health_cols[1].metric("最后心跳", current_health.get("last_heartbeat") or "-")
+        health_cols[1].metric(t("最后心跳", "Last heartbeat"), current_health.get("last_heartbeat") or "-")
         health_cols[2].metric(
-            "扫描间隔", f"{os.getenv('SCHEDULER_POLL_MINUTES', '30')} 分钟"
+            t("扫描间隔", "Polling interval"), t("{minutes} 分钟", "{minutes} minutes").format(minutes=os.getenv('SCHEDULER_POLL_MINUTES', '30'))
         )
         if not current_health["running"]:
-            st.info("周期采集当前未运行；手动新闻搜索不受影响。")
+            st.info(t("周期采集当前未运行；手动新闻搜索不受影响。", "Scheduled collection is not running. Manual search is available."))
 
     runs_df = load_task_runs(limit=100)
     if runs_df.empty:
-        st.info("暂无任务运行记录。")
+        st.info(t("暂无任务运行记录。", "No task history yet."))
         return
     status_map = {"success": "成功", "partial": "部分成功", "failed": "失败"}
     trigger_map = {"manual": "手动", "scheduled": "定时"}
@@ -1540,7 +1600,7 @@ def _render_task_center(cloud_demo: bool) -> None:
             "errors": "错误详情",
         }
     )
-    st.dataframe(display_runs, width="stretch", hide_index=True)
+    st.dataframe(localize_dataframe(display_runs), width="stretch", hide_index=True)
 
 
 def _confirmed_intent_from_review(
@@ -1558,22 +1618,22 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
         return
     revision = int(review.get("revision", 0) or 0)
     scope_labels = {
-        "broad": "范围较广",
-        "focused": "方向适中，可能有歧义",
-        "specific": "目标较明确",
+        "broad": t("范围较广", "Broad scope"),
+        "focused": t("方向适中，可能有歧义", "Focused, with possible ambiguity"),
+        "specific": t("目标较明确", "Specific intent"),
     }
 
-    st.markdown("### 🧠 搜索前，请确认我的理解")
+    st.markdown(t("### 🧠 搜索前，请确认我的理解", "### 🧠 Confirm your search intent"))
     with st.container(border=True):
         if review.get("fallback_reason"):
             st.warning(
-                "AI 本次未返回可用的搜索意图格式，已按关键词结构生成可确认的备用方案。"
+                t("AI 本次未返回可用的搜索意图格式，已按关键词结构生成可确认的备用方案。", "AI could not return a usable search plan. A fallback based on your keywords is ready to confirm.")
             )
-            st.caption(f"降级原因：{review['fallback_reason']}")
+            st.caption(t("降级原因：{reason}", "Fallback reason: {reason}").format(reason=localize(review['fallback_reason'])))
         scope = str(intent.get("scope_level", "specific"))
-        st.caption(f"搜索范围：{scope_labels.get(scope, '待确认')}")
+        st.caption(t("搜索范围：{scope}", "Search scope: {scope}").format(scope=scope_labels.get(scope, t('待确认', 'To confirm'))))
         st.markdown(
-            f"**我理解您想查找：**\n\n{intent.get('intent_summary', '')}"
+            t("**我理解您想查找：**\n\n{intent}", "**You want to find:**\n\n{intent}").format(intent=intent.get('intent_summary', ''))
         )
 
         interpretations = intent.get("interpretations", [])
@@ -1582,7 +1642,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
         if isinstance(interpretations, list) and interpretations:
             question = str(
                 intent.get("clarification_question")
-                or "请选择一个或多个希望检索的细分方向。"
+                or t("请选择一个或多个希望检索的细分方向。", "Select one or more directions to explore.")
             )
             st.markdown(f"**{question}**")
             available_options = [
@@ -1607,7 +1667,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
                     position = row_start + offset
                     with option_columns[offset]:
                         selected = st.checkbox(
-                            str(item.get("label") or f"方向 {position + 1}"),
+                            str(item.get("label") or t("方向 {number}", "Direction {number}").format(number=position + 1)),
                             value=index == recommended,
                             help=str(item.get("description") or ""),
                             key=f"intent_option_{revision}_{index}",
@@ -1617,21 +1677,20 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
                             st.caption(description)
                         if selected:
                             selected_indexes.append(index)
-            st.caption("以上方向可单选或多选。")
+            st.caption(t("以上方向可单选或多选。", "Select one or more directions."))
         elif intent.get("clarification_question"):
             st.markdown(f"**{intent['clarification_question']}**")
 
         custom_intent = st.text_area(
-            "或者，直接输入你真正想搜索的内容",
+            t("或者，直接输入你真正想搜索的内容", "Or describe exactly what you want to find"),
             placeholder=(
-                "例如：我想搜索中国企业在海外销售的产品，"
-                "以及国内供应链如何支持这些产品研发。"
+                t("例如：我想搜索中国企业在海外销售的产品，以及国内供应链如何支持这些产品研发。", "For example: Find products that Chinese companies sell overseas and how domestic supply chains support their R&D.")
             ),
             key=f"intent_custom_{revision}",
         )
         custom_query = custom_intent.strip()
         if custom_query:
-            st.caption("将以你输入的内容为准，直接生成检索词并开始搜索。")
+            st.caption(t("将以你输入的内容为准，直接生成检索词并开始搜索。", "Your description will be used to generate queries and start the search."))
 
         selected_count = 1 if custom_query else max(1, len(selected_indexes))
         articles_per_intent = int(review.get("max_articles", 8))
@@ -1642,20 +1701,17 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
         if not custom_query and selected_count > 1:
             uncapped_articles = articles_per_intent * selected_count
             quantity_text = (
-                f"已选择 {selected_count} 个方向：按每方向 "
-                f"{articles_per_intent} 篇扩大共享结果池，"
-                f"本次最多处理 {planned_articles} 篇"
+                t("已选择 {count} 个方向：按每方向 {per_direction} 篇扩大共享结果池，本次最多处理 {total} 篇", "{count} directions selected, with {per_direction} articles per direction: up to {total} articles in the shared result pool.").format(count=selected_count, per_direction=articles_per_intent, total=planned_articles)
             )
             if planned_articles < uncapped_articles:
-                quantity_text += "（已达到单次 40 篇上限）"
+                quantity_text += t("（已达到单次 40 篇上限）", " (40-article limit reached)")
             st.info(quantity_text)
             st.caption(
-                "多个方向共享本次结果池；相关性筛选后，"
-                "不保证每个方向最终都正好返回相同数量。"
+                t("多个方向共享本次结果池；相关性筛选后，不保证每个方向最终都正好返回相同数量。", "Selected directions share one result pool. Relevance filtering may leave a different number of articles for each direction.")
             )
 
         confirm_clicked = st.button(
-            "✓ 确认并开始搜索",
+            t("✓ 确认并开始搜索", "✓ Confirm and search"),
             type="primary",
             width="stretch",
             key=f"confirm_intent_{revision}",
@@ -1674,7 +1730,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
         if custom_query:
             request_query = custom_query
             try:
-                with st.spinner("AI 正在生成检索词…"):
+                with st.spinner(t("AI 正在生成检索词…", "AI is generating search queries…")):
                     custom_model = analyze_search_intent(custom_query)
                 fallback_reason = ""
             except Exception as exc:
@@ -1727,46 +1783,39 @@ def _render_search_page(cloud_demo: bool) -> None:
         _restore_latest_search()
     task_notice = str(st.session_state.pop("search_task_notice", "")).strip()
     if task_notice:
-        st.warning(task_notice)
+        st.warning(localize(task_notice))
     _, action_col = st.columns([12, 1])
     with action_col:
         st.button(
             "⚙️",
             key="open_management",
-            help="打开管理台（后台搜索和 AI 分析不会中断）",
+            help=t("打开管理台（后台搜索和 AI 分析不会中断）", "Open the admin console (search and AI analysis will continue)"),
             on_click=_set_active_view,
             args=("management",),
         )
     st.markdown(
-        """
-        <div class="news-hero">
-            <div class="hero-kicker">Travel Intelligence Search</div>
-            <div class="main-header">找到值得读的文旅新闻</div>
-            <p class="sub-header">输入一个公司、事件或行业关键词。系统会搜索真实新闻、分析相关性，<br>并把包含可核验数字的内容整理成案例。</p>
-        </div>
-        """,
+        t("\n        <div class=\"news-hero\">\n            <div class=\"hero-kicker\">Travel Intelligence Search</div>\n            <div class=\"main-header\">找到值得读的文旅新闻</div>\n            <p class=\"sub-header\">输入一个公司、事件或行业关键词。系统会搜索真实新闻、分析相关性，<br>并把包含可核验数字的内容整理成案例。</p>\n        </div>\n        ", "\n        <div class=\"news-hero\">\n            <div class=\"hero-kicker\">Travel Intelligence Search</div>\n            <div class=\"main-header\">Find travel news worth reading</div>\n            <p class=\"sub-header\">Enter a company, event, or industry keyword. Search real news, assess relevance,<br>and turn verifiable figures into useful cases.</p>\n        </div>\n        "),
         unsafe_allow_html=True,
     )
 
-    with st.form("news_search_form"):
+    with st.container(key="news_search_form"):
         st.markdown(
-            """
-            <div class="search-form-title">🔍 搜索新闻</div>
-            <div class="search-form-note">输入企业、品牌、事件、地区或行业指标；AI 先与你确认检索目标，再开始搜索。</div>
-            """,
+            t("\n            <div class=\"search-form-title\">🔍 搜索新闻</div>\n            <div class=\"search-form-note\">输入企业、品牌、事件、地区或行业指标；AI 先与你确认检索目标，再开始搜索。</div>\n            ", "\n            <div class=\"search-form-title\">🔍 Search news</div>\n            <div class=\"search-form-note\">Search a company, brand, event, region, or industry metric. Confirm the search intent with AI before searching.</div>\n            "),
             unsafe_allow_html=True,
         )
         search_col, submit_col = st.columns([7, 2])
         with search_col:
             search_keyword = st.text_input(
-                "搜索关键词",
+                t("搜索关键词", "Search keywords"),
                 value=st.session_state.get("last_search_keyword", ""),
-                placeholder="输入你想搜索的新闻关键词…",
+                placeholder=t("输入你想搜索的新闻关键词…", "Enter the news keywords you want to search…"),
                 label_visibility="collapsed",
+                key="search_keyword",
             )
         with submit_col:
-            run_button = st.form_submit_button(
-                "下一步：确认目标",
+            run_button = st.button(
+                t("下一步：确认目标", "Next: confirm intent"),
+                key="search_submit",
                 type="primary",
                 width="stretch",
                 disabled=bool(
@@ -1774,44 +1823,42 @@ def _render_search_page(cloud_demo: bool) -> None:
                     and active_task.get("status") == "running"
                 ),
             )
-        with st.expander("搜索设置"):
+        with st.expander(t("搜索设置", "Search settings")):
             option_cols = st.columns(2)
             max_articles = option_cols[0].slider(
-                "每个检索方向的文章数量",
+                t("每个检索方向的文章数量", "Articles per direction"),
                 min_value=1,
                 max_value=20,
                 value=8,
                 step=1,
+                key="max_articles",
                 help=(
-                    "选择多个细分意图时，文章数量会按方向数增加，"
-                    "单次最多处理 40 篇。数量越多，分析时间和 AI 用量越高。"
+                    t("选择多个细分意图时，文章数量会按方向数增加，单次最多处理 40 篇。数量越多，分析时间和 AI 用量越高。", "Selecting multiple directions increases the article limit, up to 40 per search. More articles take longer and use more AI capacity.")
                 ),
             )
             min_score = option_cols[1].slider(
-                "案例入库门槛", min_value=0, max_value=100, value=70, step=5,
-                help="低于门槛的结果仍会保留在新闻池。",
+                t("案例入库门槛", "Case inclusion threshold"), min_value=0, max_value=100, value=70, step=5,
+                key="min_score",
+                help=t("低于门槛的结果仍会保留在新闻池。", "Results below this threshold are still kept in the news pool."),
             )
             english_keyword = st.text_input(
-                "英文关键词（可选）",
-                placeholder="例如 overseas products China supply chain R&D",
-                help="用于搜索 Reuters、BBC、Bloomberg 等英文新闻源。",
+                t("英文关键词（可选）", "English keywords (optional)"),
+                key="english_keyword",
+                placeholder=t("例如 overseas products China supply chain R&D", "For example: overseas products China supply chain R&D"),
+                help=t("用于搜索 Reuters、BBC、Bloomberg 等英文新闻源。", "Search English-language sources such as Reuters, BBC, and Bloomberg."),
             )
         st.markdown(
-            """
-            <div class="search-examples">
-                <strong>搜索示例：</strong>半导体产业研报 · AI 行业应用与商业化 ROI · AI 市场份额与竞争格局
-            </div>
-            """,
+            t("\n            <div class=\"search-examples\">\n                <strong>搜索示例：</strong>半导体产业研报 · AI 行业应用与商业化 ROI · AI 市场份额与竞争格局\n            </div>\n            ", "\n            <div class=\"search-examples\">\n                <strong>Try searching: </strong>Semiconductor industry research · AI adoption and ROI · AI market share and competition\n            </div>\n            "),
             unsafe_allow_html=True,
         )
 
     if cloud_demo:
-        st.caption("当前是云端展示模式；应用重启后，临时数据可能重置。")
+        st.caption(t("当前是云端展示模式；应用重启后，临时数据可能重置。", "Cloud demo mode: temporary data may reset when the app restarts."))
 
     if run_button:
         keyword = search_keyword.strip()
         if not keyword:
-            st.error("请输入一个新闻关键词。")
+            st.error(t("请输入一个新闻关键词。", "Enter a news keyword."))
         else:
             st.session_state.last_search_keyword = keyword
             st.session_state.pop("last_run_summary", None)
@@ -1822,7 +1869,7 @@ def _render_search_page(cloud_demo: bool) -> None:
             st.session_state.pop("confirmed_search_request", None)
 
             try:
-                with st.spinner("🧠 AI 正在理解你想了解的新闻方向…"):
+                with st.spinner(t("🧠 AI 正在理解你想了解的新闻方向…", "🧠 AI is interpreting your search intent…")):
                     search_intent_model = analyze_search_intent(keyword)
                 intent_fallback_reason = ""
             except Exception as exc:
@@ -1904,15 +1951,15 @@ def _render_search_page(cloud_demo: bool) -> None:
         if pending_analysis:
             stage = pending_analysis.get("stage", "source")
             if stage == "source":
-                st.markdown("### AI 正在初筛搜索相关性与来源")
-                progress_text = "新闻已展示，正在生成相关性和来源 AI 评分…"
+                st.markdown(t("### AI 正在初筛搜索相关性与来源", "### AI is screening relevance and sources"))
+                progress_text = t("新闻已展示，正在生成相关性和来源 AI 评分…", "Articles are ready. AI is scoring relevance and sources…")
             else:
-                st.markdown("### AI 正在分析新闻正文")
-                progress_text = "基础分已生成，正在分析正文质量…"
+                st.markdown(t("### AI 正在分析新闻正文", "### AI is analyzing article content"))
+                progress_text = t("基础分已生成，正在分析正文质量…", "Base scores are ready. Analyzing content quality…")
             progress_bar = st.progress(0.0, text=progress_text)
 
             def update_progress(message: str, value: float) -> None:
-                progress_bar.progress(value, text=message)
+                progress_bar.progress(value, text=localize(message))
 
             try:
                 if stage == "source":
@@ -1936,10 +1983,9 @@ def _render_search_page(cloud_demo: bool) -> None:
                         st.session_state.pop("pending_analysis", None)
                         st.session_state.fetched_articles = []
                         save_last_search_state({})
-                        progress_bar.progress(1.0, text="搜索相关性初筛完成")
+                        progress_bar.progress(1.0, text=t("搜索相关性初筛完成", "Relevance screening complete"))
                         st.warning(
-                            "本次找到的候选文章与搜索意图的相关性"
-                            f"均低于 {SEARCH_RELEVANCE_DISPLAY_THRESHOLD} 分，已不作为有效结果展示。"
+                            t("本次找到的候选文章与搜索意图的相关性均低于 {threshold} 分，已不作为有效结果展示。", "All candidate articles scored below {threshold} for relevance and have been excluded from the results.").format(threshold=SEARCH_RELEVANCE_DISPLAY_THRESHOLD)
                         )
                         return
                     st.session_state.fetched_articles = articles
@@ -1953,7 +1999,7 @@ def _render_search_page(cloud_demo: bool) -> None:
                     )
                     progress_bar.progress(
                         1.0,
-                        text="相关性与来源初筛完成，基础分已生成",
+                        text=t("相关性与来源初筛完成，基础分已生成", "Relevance and source screening complete. Base scores are ready."),
                     )
                     st.rerun()
 
@@ -2024,20 +2070,20 @@ def _render_search_page(cloud_demo: bool) -> None:
                     run_summary,
                     search_intent=pending_analysis.get("search_intent"),
                 )
-                progress_bar.progress(1.0, text="分析完成")
+                progress_bar.progress(1.0, text=t("分析完成", "Analysis complete"))
                 st.rerun()
             except ValueError as exc:
-                st.error(f"配置错误：{exc}")
+                st.error(t("配置错误：{error}", "Configuration error: {error}").format(error=localize(str(exc))))
             except Exception as exc:
                 logger.error("手动任务失败: %s", exc, exc_info=True)
-                st.error(f"分析失败：{exc}")
+                st.error(t("分析失败：{error}", "Analysis failed: {error}").format(error=localize(str(exc))))
 
     last_run_summary = st.session_state.get("last_run_summary")
     if last_run_summary:
         _render_run_summary(last_run_summary)
 
     st.divider()
-    news_tab, cases_tab = st.tabs(["📰 新闻池", "📚 案例库"])
+    news_tab, cases_tab = st.tabs([t("📰 新闻池", "📰 News pool"), t("📚 案例库", "📚 Case library")])
     with news_tab:
         _render_news_pool()
     with cases_tab:
@@ -2048,27 +2094,27 @@ def _render_management_page(cloud_demo: bool) -> None:
     back_col, title_col = st.columns([2, 10])
     with back_col:
         st.button(
-            "← 返回搜索",
+            t("← 返回搜索", "← Back to search"),
             key="back_to_search",
-            help="返回新闻搜索；后台任务不会中断",
+            help=t("返回新闻搜索；后台任务不会中断", "Return to news search; background tasks will continue"),
             on_click=_set_active_view,
             args=("search",),
             width="stretch",
         )
     with title_col:
-        st.markdown('<p class="main-header" style="font-size:2rem">管理台</p>', unsafe_allow_html=True)
+        st.markdown(t("<p class=\"main-header\" style=\"font-size:2rem\">管理台</p>", "<p class=\"main-header\" style=\"font-size:2rem\">Admin console</p>"), unsafe_allow_html=True)
         st.markdown(
-            '<p class="sub-header">查看数据积累、审核案例、配置研究主题和排查任务运行。</p>',
+            t("<p class=\"sub-header\">查看数据积累、审核案例、配置研究主题和排查任务运行。</p>", "<p class=\"sub-header\">Explore collected data, review cases, manage topics, and inspect task runs.</p>"),
             unsafe_allow_html=True,
         )
     st.info(
-        "当前管理台为开放模式，无需管理员密码。任何能访问网页的人都可以审核案例和修改主题配置。",
+        t("当前管理台为开放模式，无需管理员密码。任何能访问网页的人都可以审核案例和修改主题配置。", "The admin console is open without a password. Anyone with access to this site can review cases and change topic settings."),
         icon="ℹ️",
     )
     _render_background_task_banner()
 
     database_tab, review_tab, settings_tab = st.tabs(
-        ["🗂️ 数据库管理", "✅ 人工审核", "⚙️ 系统设置"]
+        [t("🗂️ 数据库管理", "🗂️ Data management"), t("✅ 人工审核", "✅ Review"), t("⚙️ 系统设置", "⚙️ Settings")]
     )
     with database_tab:
         _render_dashboard()
@@ -2083,12 +2129,12 @@ def _render_management_page(cloud_demo: bool) -> None:
             if active_provider == "gemini"
             else get_openai_model()
         )
-        st.markdown('<p class="section-title">当前 AI 配置</p>', unsafe_allow_html=True)
+        st.markdown(t("<p class=\"section-title\">当前 AI 配置</p>", "<p class=\"section-title\">Current AI configuration</p>"), unsafe_allow_html=True)
         config_cols = st.columns(2)
-        config_cols[0].metric("模型提供方", active_provider)
-        config_cols[1].metric("当前模型", active_model)
-        st.caption("模型和 API Key 继续通过环境变量配置，页面不会显示或保存密钥。")
-        topic_settings, task_status = st.tabs(["🎯 研究主题", "⏱️ 定时任务与日志"])
+        config_cols[0].metric(t("模型提供方", "Model provider"), active_provider)
+        config_cols[1].metric(t("当前模型", "Current model"), active_model)
+        st.caption(t("模型和 API Key 继续通过环境变量配置，页面不会显示或保存密钥。", "Configure the model and API key through environment variables. Keys are never displayed or saved on this page."))
+        topic_settings, task_status = st.tabs([t("🎯 研究主题", "🎯 Research topics"), t("⏱️ 定时任务与日志", "⏱️ Scheduled tasks and logs")])
         with topic_settings:
             _render_topic_management()
         with task_status:
@@ -2100,20 +2146,22 @@ if "active_view" not in st.session_state:
     st.session_state.active_view = "search"
 
 with st.sidebar:
-    st.markdown("### 📰 文旅新闻搜索")
-    st.caption("搜索真实新闻，沉淀量化案例。")
+    st.markdown(t("### 📰 文旅新闻搜索", "### 📰 Travel News Search"))
+    st.caption(t("搜索真实新闻，沉淀量化案例。", "Find real news. Build evidence-backed cases."))
     st.button(
-        "🔎 搜索首页",
+        t("🔎 搜索首页", "🔎 Search"),
+        key="sidebar_search",
         width="stretch",
         type="primary" if st.session_state.active_view == "search" else "secondary",
         on_click=_set_active_view,
         args=("search",),
     )
     st.button(
-        "⚙️ 管理台",
+        t("⚙️ 管理台", "⚙️ Admin console"),
+        key="sidebar_management",
         width="stretch",
         type="primary" if st.session_state.active_view == "management" else "secondary",
-        help="查看数据库、人工审核和系统设置；后台搜索不会中断",
+        help=t("查看数据库、人工审核和系统设置；后台搜索不会中断", "Open data, reviews, and settings; background search will continue"),
         on_click=_set_active_view,
         args=("management",),
     )
@@ -2121,19 +2169,29 @@ with st.sidebar:
     if sidebar_task_id:
         sidebar_task = get_background_search(sidebar_task_id)
         if sidebar_task and sidebar_task.get("status") == "running":
-            st.caption(f"⏳ {sidebar_task.get('message', '后台搜索运行中…')}")
+            st.caption(f"⏳ {localize(sidebar_task.get('message', '后台搜索运行中…'))}")
         elif sidebar_task and sidebar_task.get("status") == "completed":
-            st.caption("✅ 后台搜索已完成，返回搜索页查看")
+            st.caption(t("✅ 后台搜索已完成，返回搜索页查看", "✅ Search complete. Return to search to view results."))
         elif sidebar_task:
-            st.caption("⚠️ 后台搜索需要处理")
+            st.caption(t("⚠️ 后台搜索需要处理", "⚠️ The background search needs attention"))
     st.divider()
     if cloud_demo:
-        st.caption("Cloud 展示模式 · 数据可能随重启重置")
+        st.caption(t("Cloud 展示模式 · 数据可能随重启重置", "Cloud demo · Data may reset after a restart"))
     else:
         scheduler_health = get_scheduler_health()
         st.caption(
-            "定时采集：" + ("运行中" if scheduler_health["running"] else "未运行")
+            t("定时采集：{status}", "Scheduled collection: {status}").format(status=t("运行中", "Running") if scheduler_health["running"] else t("未运行", "Stopped"))
         )
+
+_, language_col = st.columns([10, 2])
+with language_col:
+    st.button(
+        "中文" if get_language() == "en" else "English",
+        key="language_toggle",
+        on_click=toggle_language,
+        help=t("切换为英文", "Switch to Chinese"),
+        width="stretch",
+    )
 
 if st.session_state.active_view == "management":
     _render_management_page(cloud_demo)
@@ -2145,7 +2203,10 @@ active_model = (
     get_gemini_model() if active_provider == "gemini" else get_openai_model()
 )
 st.markdown(
-    f'<p class="footer-note">AI：{active_provider} / {active_model} · '
-    f'运行模式：{"cloud_demo" if cloud_demo else "local"}</p>',
+    t('<p class="footer-note">AI：{provider} / {model} · 运行模式：{mode}</p>', '<p class="footer-note">AI: {provider} / {model} · Run mode: {mode}</p>').format(
+        provider=active_provider,
+        model=active_model,
+        mode=t("云端展示", "Cloud demo") if cloud_demo else t("本地", "Local"),
+    ),
     unsafe_allow_html=True,
 )

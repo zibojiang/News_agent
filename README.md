@@ -82,6 +82,11 @@ worker 默认每 30 分钟检查一次到期主题：
 
 ## 页面说明
 
+- 网页默认显示英文，右上角点击 **中文 / English** 可一键切换搜索页和管理台的界面语言。
+- 语言选择保存在当前会话及网址的 `lang` 参数中；刷新当前网址会保留选择。
+- 切换语言会保留当前搜索输入、筛选条件和已生成的评分结果，不重新调用 AI。新闻原文、已有 AI 摘要和自定义研究主题保留原始语言。
+- 高质量结果表的界面列名及 Excel/CSV 导出列名随语言切换；切换时保留当前表格编辑和导出勾选。
+
 - **新闻搜索**：首页主流程，AI 先识别关键词范围与歧义；用户确认后，搜索、预筛和正文分析进入后台任务，切换管理台不会中断。
 - **新闻池**：首页下方展示全部已分析新闻，包含低分结果。
 - **案例库**：首页下方展示达到门槛的量化案例，支持筛选和 Excel 导出。
@@ -160,6 +165,24 @@ worker 默认每 30 分钟检查一次到期主题：
 
 
 ## 本地测试
+
+Windows PowerShell 可使用项目内的独立环境：
+
+```powershell
+python -m venv .venv-win
+.\.venv-win\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv-win\Scripts\python.exe -m streamlit run app.py
+```
+
+`.venv-win/`、`__MACOSX/` 和 `._*` 已加入 `.gitignore`，不纳入版本管理。
+
+Windows 运行自动测试：
+
+```powershell
+.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+macOS / Linux 激活虚拟环境后运行：
 
 ```bash
 python3 -m unittest discover -s tests -v

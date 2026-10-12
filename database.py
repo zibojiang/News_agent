@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -65,14 +67,20 @@ def _database_path(db_path: str | None = None) -> str:
     return db_path or os.getenv("DATABASE_PATH", DEFAULT_DATABASE_PATH)
 
 
-def _connect(db_path: str | None = None) -> sqlite3.Connection:
+@contextmanager
+def _connect(db_path: str | None = None) -> Iterator[sqlite3.Connection]:
+    """提交或回滚事务后关闭连接，及时释放 SQLite 文件句柄。"""
     path = _database_path(db_path)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=30)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA busy_timeout = 30000")
-    connection.execute("PRAGMA journal_mode = WAL")
-    return connection
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute("PRAGMA journal_mode = WAL")
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 def _collection_interval_hours(report_frequency: str) -> int:

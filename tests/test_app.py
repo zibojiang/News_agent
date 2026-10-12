@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 import tempfile
 import unittest
@@ -9,11 +10,18 @@ from unittest.mock import patch
 from streamlit.testing.v1 import AppTest
 
 from agent import SEARCH_RELEVANCE_RULE_VERSION, fallback_search_intent
-from database import load_last_search_state, save_last_search_state
+from database import load_last_search_state, load_topics, save_last_search_state
 from quality_scorer import NEWS_QUALITY_RULE_VERSION
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _chinese_app() -> AppTest:
+    """Keep existing interaction coverage in its original Chinese UI locale."""
+    app = AppTest.from_file(PROJECT_ROOT / "app.py")
+    app.session_state["ui_language"] = "zh"
+    return app.run(timeout=20)
 
 
 class AppSmokeTestCase(unittest.TestCase):
@@ -64,7 +72,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     }
                 )
 
-                app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+                app = _chinese_app()
                 self.assertEqual(list(app.exception), [])
                 self.assertFalse(
                     any(
@@ -183,7 +191,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     }
                 )
 
-                app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+                app = _chinese_app()
                 self.assertEqual(list(app.exception), [])
                 self.assertTrue(
                     any(
@@ -203,6 +211,61 @@ class AppSmokeTestCase(unittest.TestCase):
                         for markdown in app.markdown
                     )
                 )
+                original_articles = copy.deepcopy(app.session_state["fetched_articles"])
+                original_results = copy.deepcopy(app.session_state["fetched_results"])
+                original_summary = copy.deepcopy(app.session_state["last_run_summary"])
+                original_saved_state = load_last_search_state()
+                # AppTest exposes data_editor edits through the widget's state.
+                editor_key = "high_quality_editor_2026-07-30_08:00:00_75"
+                app.session_state[editor_key] = {
+                    "edited_rows": {
+                        0: {"导出": False, "新闻摘要": "用于下载的人工编辑摘要"}
+                    },
+                    "added_rows": [],
+                    "deleted_rows": [],
+                }
+                app.run(timeout=20)
+                self.assertEqual(list(app.exception), [])
+
+                with (
+                    patch("agent.analyze_search_intent") as analyze_intent,
+                    patch("agent.fetch_and_pre_score") as fetch_news,
+                ):
+                    app.button(key="language_toggle").click().run(timeout=20)
+                    self.assertEqual(list(app.exception), [])
+                    self.assertEqual(app.session_state["ui_language"], "en")
+                    self.assertTrue(
+                        any("当前规则评分新闻" in item.value for item in app.markdown)
+                    )
+                    self.assertTrue(
+                        any("当前规则生成的摘要" in item.value for item in app.markdown)
+                    )
+                    edited_table = next(
+                        item.value for item in app.dataframe if "导出" in item.value.columns
+                    )
+                    self.assertFalse(edited_table.iloc[0]["导出"])
+                    self.assertEqual(
+                        edited_table.iloc[0]["新闻摘要"], "用于下载的人工编辑摘要"
+                    )
+                    self.assertTrue(
+                        any("Select at least one article" in item.value for item in app.warning)
+                    )
+                    app.button(key="language_toggle").click().run(timeout=20)
+                    self.assertEqual(list(app.exception), [])
+                    edited_table = next(
+                        item.value for item in app.dataframe if "导出" in item.value.columns
+                    )
+                    self.assertFalse(edited_table.iloc[0]["导出"])
+                    self.assertEqual(
+                        edited_table.iloc[0]["新闻摘要"], "用于下载的人工编辑摘要"
+                    )
+                    analyze_intent.assert_not_called()
+                    fetch_news.assert_not_called()
+
+                self.assertEqual(app.session_state["fetched_articles"], original_articles)
+                self.assertEqual(app.session_state["fetched_results"], original_results)
+                self.assertEqual(app.session_state["last_run_summary"], original_summary)
+                self.assertEqual(load_last_search_state(), original_saved_state)
 
     def test_base_score_expander_keeps_ai_source_details(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -265,7 +328,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     }
                 )
 
-                app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+                app = _chinese_app()
                 self.assertEqual(list(app.exception), [])
                 self.assertTrue(
                     any(
@@ -301,7 +364,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     "ADMIN_PASSWORD": "",
                 },
             ):
-                app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+                app = _chinese_app()
                 self.assertEqual(list(app.exception), [])
                 button_labels = [button.label for button in app.button]
                 self.assertIn("下一步：确认目标", button_labels)
@@ -576,7 +639,7 @@ class AppSmokeTestCase(unittest.TestCase):
                     "ADMIN_PASSWORD": "",
                 },
             ):
-                app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+                app = _chinese_app()
                 app.session_state["search_intent_review"] = {
                     "original_query": "海外产品供应链",
                     "intent": {
@@ -641,6 +704,184 @@ class AppSmokeTestCase(unittest.TestCase):
                     fetch_news.call_args.kwargs["additional_queries"],
                     [custom_query],
                 )
+
+
+class BilingualAppTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        environment = patch.dict(
+            os.environ,
+            {
+                "DATABASE_PATH": str(Path(temp_dir.name) / "industry_news.db"),
+                "DEPLOYMENT_MODE": "cloud_demo",
+                "ADMIN_PASSWORD": "",
+            },
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_defaults_to_english_and_switches_both_pages(self) -> None:
+        app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(app.session_state["ui_language"], "en")
+        self.assertEqual(app.button(key="search_submit").label, "Next: confirm intent")
+        self.assertEqual(app.button(key="language_toggle").label, "中文")
+        self.assertFalse(
+            any("找到值得读的文旅新闻" in item.value for item in app.markdown)
+        )
+
+        app.button(key="language_toggle").click().run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(app.session_state["ui_language"], "zh")
+        self.assertEqual(app.button(key="language_toggle").label, "English")
+        self.assertEqual(app.button(key="search_submit").label, "下一步：确认目标")
+        self.assertTrue(
+            any("找到值得读的文旅新闻" in item.value for item in app.markdown)
+        )
+
+        app.button(key="open_management").click().run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(app.session_state["active_view"], "management")
+        self.assertEqual(app.session_state["ui_language"], "zh")
+        self.assertIn("⚙️ 系统设置", [tab.label for tab in app.tabs])
+
+        app.button(key="language_toggle").click().run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(app.session_state["ui_language"], "en")
+        self.assertNotIn("⚙️ 系统设置", [tab.label for tab in app.tabs])
+        self.assertNotIn("🗂️ 数据库管理", [tab.label for tab in app.tabs])
+        app.button(key="back_to_search").click().run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(app.session_state["ui_language"], "en")
+        self.assertEqual(app.button(key="search_submit").label, "Next: confirm intent")
+
+    def test_language_switch_preserves_search_draft_and_settings(self) -> None:
+        app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        app.text_input(key="search_keyword").input("国内供应链与海外产品")
+        app.text_input(key="english_keyword").input("overseas products supply chain")
+        app.slider(key="max_articles").set_value(13)
+        app.slider(key="min_score").set_value(85)
+        app.selectbox(key="news_status_filter").select("已确认")
+        app.selectbox(key="news_sort").select("质量最高")
+        app.number_input(key="news_score_filter").set_value(55)
+
+        with (
+            patch("agent.analyze_search_intent") as analyze_intent,
+            patch("agent.fetch_and_pre_score") as fetch_news,
+        ):
+            for language in ("zh", "en"):
+                app.button(key="language_toggle").click().run(timeout=20)
+                self.assertEqual(list(app.exception), [])
+                self.assertEqual(app.session_state["ui_language"], language)
+                self.assertEqual(
+                    app.text_input(key="search_keyword").value, "国内供应链与海外产品"
+                )
+                self.assertEqual(
+                    app.text_input(key="english_keyword").value,
+                    "overseas products supply chain",
+                )
+                self.assertEqual(app.slider(key="max_articles").value, 13)
+                self.assertEqual(app.slider(key="min_score").value, 85)
+                self.assertEqual(app.selectbox(key="news_status_filter").value, "已确认")
+                self.assertEqual(app.selectbox(key="news_sort").value, "质量最高")
+                self.assertEqual(app.number_input(key="news_score_filter").value, 55)
+            analyze_intent.assert_not_called()
+            fetch_news.assert_not_called()
+
+    def test_language_switch_preserves_intent_review_and_custom_input(self) -> None:
+        app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        review = {
+            "original_query": "AI",
+            "intent": {
+                "intent_summary": "了解 AI 行业与应用",
+                "target_topics": ["AI"],
+                "chinese_queries": ["AI 新闻"],
+                "english_queries": ["AI news"],
+                "relevance_criteria": ["新闻讨论 AI"],
+                "scope_level": "broad",
+                "needs_clarification": True,
+                "clarification_question": "选择想了解的方向。",
+                "interpretations": [
+                    {"label": "AI 行业", "description": "行业动态"},
+                    {"label": "AI 应用", "description": "商业应用"},
+                ],
+                "recommended_interpretation_index": 0,
+            },
+            "fallback_reason": "",
+            "max_articles": 8,
+            "min_score": 70,
+            "english_keyword": "",
+            "revision": 3,
+        }
+        app.session_state["search_intent_review"] = copy.deepcopy(review)
+        app.run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        app.checkbox(key="intent_option_3_0").uncheck()
+        app.checkbox(key="intent_option_3_1").check()
+        app.text_area(key="intent_custom_3").input("AI 应用的量化商业案例")
+
+        with (
+            patch("agent.analyze_search_intent") as analyze_intent,
+            patch("agent.fetch_and_pre_score") as fetch_news,
+        ):
+            for language in ("zh", "en"):
+                app.button(key="language_toggle").click().run(timeout=20)
+                self.assertEqual(list(app.exception), [])
+                self.assertEqual(app.session_state["ui_language"], language)
+                self.assertFalse(app.checkbox(key="intent_option_3_0").value)
+                self.assertTrue(app.checkbox(key="intent_option_3_1").value)
+                self.assertEqual(
+                    app.text_area(key="intent_custom_3").value, "AI 应用的量化商业案例"
+                )
+                self.assertEqual(app.session_state["search_intent_review"], review)
+            analyze_intent.assert_not_called()
+            fetch_news.assert_not_called()
+
+    def test_language_query_parameter_restores_preference(self) -> None:
+        app = AppTest.from_file(PROJECT_ROOT / "app.py")
+        app.query_params["lang"] = "zh"
+        app.run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(app.session_state["ui_language"], "zh")
+        self.assertEqual(app.button(key="search_submit").label, "下一步：确认目标")
+        app.button(key="language_toggle").click().run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(app.session_state["ui_language"], "en")
+        self.assertIn("en", app.query_params["lang"])
+
+    def test_language_switch_keeps_unsaved_topic_configuration(self) -> None:
+        app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        app.button(key="open_management").click().run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        initial_topics = load_topics(include_custom=False)
+        self.assertFalse(initial_topics.empty)
+        topic_id = initial_topics.iloc[0]["topic_id"]
+        app.session_state["topics_editor"] = {
+            "edited_rows": {
+                0: {
+                    "search_keywords": "bilingual draft 保留搜索词",
+                    "enabled": False,
+                    "min_score": 85,
+                }
+            },
+            "added_rows": [],
+            "deleted_rows": [],
+        }
+        app.run(timeout=20)
+        app.button(key="language_toggle").click().run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        app.button(key="save_topic_settings").click().run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+
+        updated_topics = load_topics(include_custom=False)
+        updated = updated_topics[updated_topics["topic_id"] == topic_id].iloc[0]
+        self.assertEqual(updated["search_keywords"], "bilingual draft 保留搜索词")
+        self.assertFalse(updated["enabled"])
+        self.assertEqual(updated["min_score"], 85)
 
 
 if __name__ == "__main__":
