@@ -129,6 +129,31 @@ def _analyze_intent_for_session(query: str) -> SearchIntentSchema:
     return result
 
 
+def _intent_failure_feedback(code: str) -> tuple[str, str]:
+    """Map safe error codes to UI copy without exposing arbitrary exception text."""
+    reasons = {
+        "timeout": t("AI 生成搜索方案超时。", "AI search planning timed out."),
+        "auth": t("AI 服务认证失败或没有模型访问权限。", "The app could not authenticate with the AI service or access the model."),
+        "rate_limit": t("AI 服务暂时限流或配额不足。", "The AI service is rate-limited or has insufficient quota."),
+        "model_unavailable": t("当前配置的搜索意图模型不可用。", "The configured search-planning model is unavailable."),
+        "connection": t("暂时无法连接 AI 服务。", "The app could not connect to the AI service."),
+        "configuration": t("搜索意图 AI 服务尚未正确配置。", "AI search planning is not configured correctly."),
+        "invalid_response": t("AI 返回的搜索方案不完整或格式不正确。", "AI returned an incomplete or invalid search plan."),
+    }
+    reason = reasons.get(code, t("AI 本次未能生成可用的搜索方案。", "AI could not generate a usable search plan this time."))
+    if code in {"auth", "model_unavailable", "configuration"}:
+        next_step = t(
+            "原始关键词已保留，可直接确认搜索。请联系管理员检查 AI 配置后再重试。",
+            "Your original keywords are preserved, so you can confirm and search. Ask the app administrator to check the AI configuration before retrying.",
+        )
+    else:
+        next_step = t(
+            "原始关键词已保留，可直接确认搜索，也可以重试生成搜索方案。",
+            "Your original keywords are preserved. Confirm and search, or retry AI planning.",
+        )
+    return reason, next_step
+
+
 def _parse_quality_json(raw: Any) -> dict:
     """从 DB 的 quality_json 字段解析质量评分字典。"""
     if raw is None or (isinstance(raw, float) and pd.isna(raw)):
@@ -1051,16 +1076,20 @@ def _render_article_cards(
         if intent.get("used_fallback"):
             st.warning(
                 t(
-                    "AI 搜索意图理解未成功，本次已降级为原始中文关键词搜索。英文检索词只会在 AI 成功生成或你手动填写时使用。",
-                    "AI search intent analysis failed. This search uses the original Chinese keywords. English queries are used only when generated successfully or entered manually.",
+                    "本次使用你确认的关键词备用方案进行搜索。",
+                    "This search uses the keyword fallback plan you confirmed.",
                 )
             )
-            fallback_reason = str(intent.get("fallback_reason", "")).strip()
-            if fallback_reason:
-                st.caption(t("降级原因：{reason}", "Fallback reason: {reason}").format(reason=localize(fallback_reason)))
+            reason, _ = _intent_failure_feedback(str(intent.get("fallback_code", "api_error")))
+            st.caption(reason)
         summary_text = intent_text(intent, "intent_summary")
         if summary_text:
-            st.info(t("🧠 AI 理解的搜索目标：{intent}", "🧠 AI interpretation of your search: {intent}").format(intent=summary_text))
+            summary_label = (
+                t("已确认的关键词搜索目标：{intent}", "Confirmed keyword search: {intent}")
+                if intent.get("used_fallback")
+                else t("🧠 AI 理解的搜索目标：{intent}", "🧠 AI interpretation of your search: {intent}")
+            )
+            st.info(summary_label.format(intent=summary_text))
         with st.expander(t("查看本次中英文检索策略", "View Chinese and English search strategy")):
             selected_intents = intent.get("selected_intents", []) or []
             target_topics = intent.get("target_topics", []) or []
@@ -1078,7 +1107,12 @@ def _render_article_cards(
             if target_topics:
                 st.markdown(t("**目标主题：**", "**Target topics:** ") + " · ".join(map(str, target_topics)))
             if chinese_queries:
-                st.markdown(t("**中文检索词：**", "**Chinese queries:** ") + " · ".join(map(str, chinese_queries)))
+                query_label = (
+                    t("**检索词：**", "**Search queries:** ")
+                    if intent.get("used_fallback")
+                    else t("**中文检索词：**", "**Chinese queries:** ")
+                )
+                st.markdown(query_label + " · ".join(map(str, chinese_queries)))
             if english_queries:
                 st.markdown(t("**英文检索词：**", "**English queries:** ") + " · ".join(map(str, english_queries)))
             if relevance_criteria:
@@ -1566,12 +1600,18 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
     }
 
     st.markdown(t("### 🧠 搜索前，请确认我的理解", "### 🧠 Confirm your search intent"))
+    retry_clicked = False
     with st.container(border=True):
         if review.get("fallback_reason"):
-            st.warning(
-                t("AI 本次未返回可用的搜索意图格式，已按关键词结构生成可确认的备用方案。", "AI could not return a usable search plan. A fallback based on your keywords is ready to confirm.")
+            reason, next_step = _intent_failure_feedback(
+                str(review.get("fallback_code", "api_error"))
             )
-            st.caption(t("已保留原始关键词。你可以直接确认，也可以补充更具体的搜索目标。", "Your original keywords are preserved. Confirm below or refine your request."))
+            st.warning(reason)
+            st.caption(next_step)
+            retry_clicked = st.button(
+                t("重试 AI 搜索方案", "Retry AI planning"),
+                key=f"retry_intent_{revision}",
+            )
         scope = str(intent.get("scope_level", "specific"))
         st.caption(t("搜索范围：{scope}", "Search scope: {scope}").format(scope=scope_labels.get(scope, t('待确认', 'To confirm'))))
         st.caption(t("新闻语言：{language}", "Article language: {language}").format(
@@ -1667,9 +1707,27 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
             ),
         )
 
+    if retry_clicked:
+        try:
+            with st.spinner(t("AI 正在重新生成搜索方案…", "AI is retrying your search plan…"), show_time=True):
+                retried_model = _analyze_intent_for_session(str(review.get("original_query", "")))
+        except Exception as exc:
+            logger.warning("重试 AI 搜索意图失败: %s", exc)
+            review["fallback_reason"] = str(exc) or type(exc).__name__
+            review["fallback_code"] = getattr(exc, "reason_code", "api_error")
+        else:
+            review["intent"] = retried_model.model_dump()
+            review["fallback_reason"] = ""
+            review["fallback_code"] = ""
+            review["revision"] = revision + 1
+            st.session_state[f"intent_custom_{revision + 1}"] = custom_intent
+        st.session_state.search_intent_review = review
+        st.rerun()
+
     if confirm_clicked:
         request_query = str(review.get("original_query", ""))
         fallback_reason = str(review.get("fallback_reason", ""))
+        fallback_code = str(review.get("fallback_code", "api_error")) if fallback_reason else ""
         intent_to_confirm = intent
         indexes_to_confirm: list[int] | None = selected_indexes
         if custom_query:
@@ -1678,6 +1736,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
                 with st.spinner(t("AI 正在生成检索词…", "AI is generating search queries…"), show_time=True):
                     custom_model = _analyze_intent_for_session(custom_query)
                 fallback_reason = ""
+                fallback_code = ""
             except Exception as exc:
                 logger.warning("AI 理解自定义搜索内容失败: %s", exc)
                 custom_model = fallback_search_intent(
@@ -1687,6 +1746,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
                     ),
                 )
                 fallback_reason = str(exc) or type(exc).__name__
+                fallback_code = getattr(exc, "reason_code", "api_error")
             intent_to_confirm = custom_model.model_dump()
             intent_to_confirm["interpretations"] = []
             intent_to_confirm["needs_clarification"] = False
@@ -1700,6 +1760,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
         )
         confirmed["used_fallback"] = bool(fallback_reason)
         confirmed["fallback_reason"] = fallback_reason
+        confirmed["fallback_code"] = fallback_code
         selected_count = int(confirmed.get("selected_intent_count", 1) or 1)
         articles_per_intent = int(review.get("max_articles", 8))
         planned_articles = calculate_multi_intent_article_limit(
@@ -1832,6 +1893,7 @@ def _render_search_page(cloud_demo: bool) -> None:
                 with st.spinner(t("🧠 AI 正在理解你想了解的新闻方向…", "🧠 AI is interpreting your search intent…"), show_time=True):
                     search_intent_model = _analyze_intent_for_session(keyword)
                 intent_fallback_reason = ""
+                intent_fallback_code = ""
             except Exception as exc:
                 logger.warning("AI 搜索意图理解失败，使用原始查询: %s", exc)
                 search_intent_model = fallback_search_intent(
@@ -1839,10 +1901,12 @@ def _render_search_page(cloud_demo: bool) -> None:
                     english_query=english_keyword.strip() or None,
                 )
                 intent_fallback_reason = str(exc) or type(exc).__name__
+                intent_fallback_code = getattr(exc, "reason_code", "api_error")
             st.session_state.search_intent_review = {
                 "original_query": keyword,
                 "intent": search_intent_model.model_dump(),
                 "fallback_reason": intent_fallback_reason,
+                "fallback_code": intent_fallback_code,
                 "max_articles": int(max_articles),
                 "min_score": int(min_score),
                 "english_keyword": english_keyword.strip(),

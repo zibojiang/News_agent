@@ -607,7 +607,7 @@ class AppSmokeTestCase(unittest.TestCase):
                 )
                 self.assertTrue(
                     any(
-                        "AI 搜索意图理解未成功" in warning.value
+                        "关键词备用方案" in warning.value
                         for warning in app.warning
                     )
                 )
@@ -959,6 +959,113 @@ class BilingualAppTestCase(unittest.TestCase):
             self.assertEqual(list(app.exception), [])
             self.assertEqual(analyze.call_count, 2)
             self.assertEqual(app.session_state["search_intent_review"]["fallback_reason"], "")
+
+    def test_intent_failure_codes_show_safe_bilingual_reasons(self) -> None:
+        expected = {
+            "timeout": ("timed out", "超时"),
+            "auth": ("authenticate", "认证失败"),
+            "rate_limit": ("rate-limited", "限流"),
+            "model_unavailable": ("model is unavailable", "模型不可用"),
+            "connection": ("could not connect", "无法连接"),
+            "configuration": ("not configured correctly", "未正确配置"),
+            "invalid_response": ("incomplete or invalid", "不完整或格式不正确"),
+            "api_error": ("could not generate", "未能生成"),
+        }
+        app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+        for code, (english, chinese) in expected.items():
+            failure = RuntimeError("private-diagnostic-do-not-display")
+            failure.reason_code = code
+            with self.subTest(code=code), patch("agent.analyze_search_intent", side_effect=failure):
+                app.session_state["ui_language"] = "en"
+                app.text_input(key="search_keyword").input("AI Hardware Accelerator")
+                app.button(key="search_submit").click().run(timeout=20)
+                self.assertEqual(list(app.exception), [])
+                self.assertIn(english, "\n".join(item.value for item in app.warning))
+                self.assertEqual(app.session_state["search_intent_review"]["fallback_code"], code)
+                app.button(key="language_toggle").click().run(timeout=20)
+                self.assertIn(chinese, "\n".join(item.value for item in app.warning))
+                visible = "\n".join(item.value for group in (app.warning, app.caption, app.markdown) for item in group)
+                self.assertNotIn("private-diagnostic-do-not-display", visible)
+
+    def test_intent_retry_preserves_draft_on_failure_and_success_without_searching(self) -> None:
+        query = "AI Hardware Accelerator"
+        draft = "Focus on chip architecture and energy efficiency."
+        failure = RuntimeError("private-diagnostic-do-not-display")
+        failure.reason_code = "timeout"
+        success = fallback_search_intent(query)
+        success.intent_summary_en = "Explore AI hardware architecture and energy efficiency."
+        with (
+            patch("agent.analyze_search_intent", side_effect=[failure, failure, success]) as analyze,
+            patch("agent.fetch_and_pre_score") as fetch,
+        ):
+            app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+            app.text_input(key="search_keyword").input(query)
+            app.button(key="search_submit").click().run(timeout=20)
+            original_intent = copy.deepcopy(app.session_state["search_intent_review"]["intent"])
+            app.text_area(key="intent_custom_0").input(draft)
+            app.button(key="retry_intent_0").click().run(timeout=20)
+            self.assertEqual(list(app.exception), [])
+            self.assertEqual(app.session_state["search_intent_review"]["intent"], original_intent)
+            self.assertEqual(app.text_area(key="intent_custom_0").value, draft)
+            self.assertTrue(app.warning)
+            app.button(key="retry_intent_0").click().run(timeout=20)
+            self.assertEqual(list(app.exception), [])
+            review = app.session_state["search_intent_review"]
+            self.assertEqual(review["fallback_reason"], "")
+            self.assertEqual(review["fallback_code"], "")
+            self.assertEqual(review["intent"]["intent_summary_en"], success.intent_summary_en)
+            self.assertEqual(app.text_area(key="intent_custom_1").value, draft)
+            self.assertFalse(any(item.key.startswith("retry_intent_") for item in app.button))
+            self.assertEqual(analyze.call_count, 3)
+            self.assertEqual([call.args for call in analyze.call_args_list], [(query,)] * 3)
+            fetch.assert_not_called()
+
+    def test_fallback_can_be_confirmed_without_retry_and_keeps_failure_code(self) -> None:
+        failure = RuntimeError("private-diagnostic-do-not-display")
+        failure.reason_code = "auth"
+        with (
+            patch("agent.analyze_search_intent", side_effect=failure) as analyze,
+            patch("search_task.start_background_search", return_value="test-task") as start,
+            patch("search_task.get_background_search", return_value=None),
+        ):
+            app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+            app.text_input(key="search_keyword").input("AI Hardware Accelerator")
+            app.button(key="search_submit").click().run(timeout=20)
+            app.button(key="confirm_intent_0").click().run(timeout=20)
+            self.assertEqual(list(app.exception), [])
+            analyze.assert_called_once()
+            start.assert_called_once()
+            request = start.call_args.args[0]
+            self.assertEqual(request["primary_query"], "AI Hardware Accelerator")
+            self.assertEqual(request["search_intent"]["fallback_code"], "auth")
+            self.assertTrue(request["search_intent"]["used_fallback"])
+
+    def test_legacy_fallback_results_do_not_claim_ai_or_chinese_keywords(self) -> None:
+        app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+        intent = fallback_search_intent("AI Hardware Accelerator").model_dump()
+        intent.update(used_fallback=True, fallback_reason="private-diagnostic-do-not-display")
+        app.session_state["fetched_search_intent"] = intent
+        app.session_state["active_search_task_id"] = "fallback-search-task"
+        articles = [{
+            "title": "New AI hardware architecture", "url": "https://example.com/news",
+            "source": "Example", "language": "en", "published_at": "2026-10-12 10:00:00",
+            "content": "New AI hardware architecture improves energy efficiency. " * 8,
+        }]
+        # Newly fetched articles render through the running task, before scoring.
+        snapshot = {
+            "status": "running", "stage": "source", "progress": 0.4,
+            "keyword": "AI Hardware Accelerator", "search_intent": intent,
+            "articles": articles, "results": {},
+        }
+        with patch("search_task.get_background_search", return_value=snapshot):
+            app.run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        visible = "\n".join(item.value for group in (app.warning, app.caption, app.markdown, app.info) for item in group)
+        self.assertIn("Confirmed keyword search", visible)
+        self.assertIn("Search queries", visible)
+        self.assertNotIn("AI interpretation of your search", visible)
+        self.assertNotIn("original Chinese keywords", visible)
+        self.assertNotIn("private-diagnostic-do-not-display", visible)
 
     def test_language_query_parameter_restores_preference(self) -> None:
         app = AppTest.from_file(PROJECT_ROOT / "app.py")

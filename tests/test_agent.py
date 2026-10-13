@@ -13,6 +13,8 @@ from agent import (
     NewsCaseSchema,
     SEARCH_RELEVANCE_RULE_VERSION,
     SearchIntentSchema,
+    SearchIntentDraft,
+    SearchIntentError,
     SourceCredibilitySchema,
     _build_source_credibility_prompt,
     _analyze_articles_parallel,
@@ -35,6 +37,12 @@ from agent import (
     run_pipeline,
     score_sources_with_ai,
 )
+
+
+class SimpleStatusError(RuntimeError):
+    def __init__(self, status: int):
+        self.status_code = status
+        super().__init__("private-service-response")
 
 
 def _body_quality() -> BodyQualitySchema:
@@ -330,7 +338,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
             request = get_client.return_value.chat.completions.create.call_args.kwargs
             self.assertEqual(request["model"], "deepseek-ai/DeepSeek-V4-Flash")
             self.assertEqual(request["extra_body"], {"enable_thinking": False})
-            self.assertEqual(request["max_tokens"], 4096)
+            self.assertEqual(request["max_tokens"], 2400)
             self.assertEqual(get_openai_model(), "deepseek-ai/DeepSeek-V4-Pro")
 
     def test_intent_transport_failure_does_not_repeat_network_wait(self) -> None:
@@ -343,6 +351,112 @@ class AgentEvidenceTestCase(unittest.TestCase):
                 analyze_search_intent("AI", provider="deepseek")
             self.assertEqual(get_client.return_value.chat.completions.create.call_count, 1)
             sleep.assert_not_called()
+
+    def test_compact_intent_requires_both_languages_and_expands_search_goals(self) -> None:
+        original = fallback_search_intent("AI")
+        payload = {
+            "intent_summary": original.intent_summary,
+            "intent_summary_en": original.intent_summary_en,
+            "chinese_query": "人工智能 最新新闻",
+            "english_query": "artificial intelligence news",
+            "scope_level": "broad",
+            "clarification_question": original.clarification_question,
+            "clarification_question_en": original.clarification_question_en,
+            "interpretations": [
+                {
+                    "label": item.label,
+                    "label_en": item.label_en,
+                    "description": item.intent_summary,
+                    "description_en": item.intent_summary_en,
+                    "chinese_query": item.chinese_queries[0],
+                    "english_query": item.english_queries[0],
+                }
+                for item in original.interpretations
+            ],
+        }
+        schema = SearchIntentDraft.model_json_schema()
+        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+        direction = schema["$defs"]["IntentDirectionDraft"]
+        self.assertEqual(set(direction["required"]), set(direction["properties"]))
+        normalized = _normalize_search_intent_payload(payload, "AI")
+        merged = merge_search_interpretations(normalized, [1, 2])
+        self.assertEqual(merged["selected_intent_count"], 2)
+        self.assertIn("commercialization", merged["intent_summary_en"])
+        self.assertEqual(merged["english_queries"], [
+            original.interpretations[index].english_queries[0] for index in (1, 2)
+        ])
+        for index, item in enumerate(normalized["interpretations"]):
+            self.assertEqual(item["intent_summary"], payload["interpretations"][index]["description"])
+            self.assertIn(item["intent_summary"], item["relevance_criteria"][0])
+        payload["interpretations"][0]["description_en"] = "中文未翻译"
+        with self.assertRaisesRegex(ValueError, "English intent fields"):
+            _normalize_search_intent_payload(payload, "AI")
+        del payload["interpretations"][0]["description_en"]
+        with self.assertRaises(ValueError):
+            _normalize_search_intent_payload(payload, "AI")
+
+    def test_compact_intent_is_used_by_all_provider_routes(self) -> None:
+        draft = SearchIntentDraft(
+            intent_summary="对比 AI 加速器的能源效率",
+            intent_summary_en="Compare energy efficiency of AI accelerators.",
+            chinese_query="AI 加速器 能源效率 对比",
+            english_query="AI accelerator energy efficiency comparison",
+            scope_level="specific", clarification_question="", clarification_question_en="",
+            interpretations=[],
+        )
+        for provider in ("openai", "gemini", "deepseek"):
+            with (
+                self.subTest(provider=provider),
+                patch.dict(os.environ, {"OPENAI_BASE_URL": ""}),
+                patch("agent._get_openai_client") as openai_client,
+                patch("agent._get_gemini_client") as gemini_client,
+            ):
+                openai_client.return_value.responses.parse.return_value = SimpleNamespace(output_parsed=draft)
+                gemini_client.return_value.models.generate_content.return_value = SimpleNamespace(text=draft.model_dump_json())
+                openai_client.return_value.chat.completions.create.return_value = SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=draft.model_dump_json()))]
+                )
+                result = analyze_search_intent("AI accelerator energy efficiency comparison", provider=provider)
+                self.assertEqual(result.english_queries, [draft.english_query])
+                self.assertFalse(result.needs_clarification)
+                self.assertEqual(result.interpretations, [])
+                if provider == "openai":
+                    self.assertIs(openai_client.return_value.responses.parse.call_args.kwargs["text_format"], SearchIntentDraft)
+                elif provider == "gemini":
+                    self.assertIs(gemini_client.return_value.models.generate_content.call_args.kwargs["config"].response_schema, SearchIntentDraft)
+                else:
+                    prompt = openai_client.return_value.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+                    self.assertIn('"english_query"', prompt)
+
+    def test_intent_failures_are_categorized_without_raw_response_or_retries(self) -> None:
+        for code, error in (
+            ("timeout", TimeoutError("private-service-response")),
+            ("connection", ConnectionError("private-service-response")),
+            ("api_error", RuntimeError("private-service-response")),
+            *[(code, SimpleStatusError(status)) for status, code in (
+                (401, "auth"), (403, "auth"), (429, "rate_limit"), (404, "model_unavailable")
+            )],
+        ):
+            with self.subTest(code=code), patch("agent._get_openai_client") as client:
+                client.return_value.chat.completions.create.side_effect = error
+                with self.assertRaises(SearchIntentError) as raised:
+                    analyze_search_intent("AI", provider="deepseek")
+                self.assertEqual(raised.exception.reason_code, code)
+                self.assertNotIn("private-service-response", str(raised.exception))
+                self.assertNotIn("OpenAI", str(raised.exception))
+                self.assertEqual(client.return_value.chat.completions.create.call_count, 1)
+
+    def test_missing_intent_api_key_is_configuration_error_without_retry(self) -> None:
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": ""}),
+            patch("agent.OpenAI") as client,
+            patch("agent._get_openai_client", wraps=_get_openai_client) as get_client,
+        ):
+            with self.assertRaises(SearchIntentError) as raised:
+                analyze_search_intent("AI", provider="deepseek")
+            self.assertEqual(raised.exception.reason_code, "configuration")
+            get_client.assert_called_once()
+            client.assert_not_called()
 
     def test_intent_format_retry_only_uses_remaining_budget(self) -> None:
         valid = fallback_search_intent("AI")

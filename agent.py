@@ -157,6 +157,30 @@ class SearchIntentSchema(BaseModel):
     )
 
 
+class IntentDirectionDraft(BaseModel):
+    """Small wire format; each search goal is generated only once per language."""
+
+    label: str = Field(min_length=1)
+    label_en: str = Field(min_length=1)
+    description: str = Field(min_length=1, description="独立的搜索目标，包含主题和关注点")
+    description_en: str = Field(min_length=1)
+    chinese_query: str = Field(min_length=1)
+    english_query: str = Field(min_length=1)
+
+
+class SearchIntentDraft(BaseModel):
+    """Require both languages without asking the model to repeat derived fields."""
+
+    intent_summary: str = Field(min_length=1)
+    intent_summary_en: str = Field(min_length=1)
+    chinese_query: str = Field(min_length=1)
+    english_query: str = Field(min_length=1)
+    scope_level: Literal["broad", "focused", "specific"]
+    clarification_question: str
+    clarification_question_en: str
+    interpretations: list[IntentDirectionDraft] = Field(max_length=4)
+
+
 class SourceCredibilitySchema(BaseModel):
     """AI 对单篇新闻的搜索相关性与来源权威度评分。"""
 
@@ -310,6 +334,48 @@ class ArticleAnalysisError(RuntimeError):
     """单篇新闻经过重试后仍无法完成 AI 分析。"""
 
 
+class AIConfigurationError(ValueError):
+    """Configuration errors cannot be fixed by retrying model output."""
+
+
+class SearchIntentError(ArticleAnalysisError):
+    """Stable, safe error categories for the bilingual confirmation page."""
+
+    REASONS = {
+        "timeout": "搜索意图请求超时",
+        "auth": "AI API Key 无效或无模型访问权限",
+        "rate_limit": "AI 配额不足或请求频率受限（429）",
+        "model_unavailable": "搜索意图模型不可用",
+        "connection": "无法连接 AI 服务",
+        "configuration": "搜索意图服务配置不完整或无效",
+        "invalid_response": "AI 返回的搜索意图格式或双语字段不符合要求",
+        "api_error": "AI 服务调用失败",
+    }
+
+    def __init__(self, reason_code: str):
+        self.reason_code = reason_code if reason_code in self.REASONS else "api_error"
+        super().__init__(self.REASONS[self.reason_code])
+
+
+def _intent_error_code(exc: Exception) -> str:
+    """Use SDK status/type, never raw response bodies in user-facing errors."""
+    if isinstance(exc, AIConfigurationError):
+        return "configuration"
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    name = type(exc).__name__.lower()
+    if status in {401, 403} or any(word in name for word in ("authentication", "permissiondenied")):
+        return "auth"
+    if status == 429 or "ratelimit" in name:
+        return "rate_limit"
+    if status == 404 or "notfound" in name:
+        return "model_unavailable"
+    if isinstance(exc, TimeoutError) or "timeout" in name or status == 504:
+        return "timeout"
+    if isinstance(exc, ConnectionError) or "connection" in name:
+        return "connection"
+    return "api_error"
+
+
 def _classify_openai_error(exc: Exception, model_name: str) -> str:
     """将 OpenAI SDK 异常转换为不包含密钥的用户可读信息。"""
     message = str(exc).lower()
@@ -425,7 +491,7 @@ def _get_gemini_client(*, timeout_seconds: float | None = None) -> genai.Client:
     """
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key or api_key == "your_gemini_api_key_here":
-        raise ValueError(
+        raise AIConfigurationError(
             "未配置有效的 GEMINI_API_KEY，请在 .env 文件中设置你的 Google AI API Key"
         )
     options: dict[str, Any] = {}
@@ -443,7 +509,7 @@ def _get_openai_client(
     """初始化 OpenAI 客户端，不在日志中暴露密钥。"""
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key or api_key == "your_openai_api_key_here":
-        raise ValueError(
+        raise AIConfigurationError(
             "未配置有效的 OPENAI_API_KEY，请在 .env 或 Streamlit Secrets 中设置"
         )
     base_url = os.getenv("OPENAI_BASE_URL", "").strip() or None
@@ -533,20 +599,20 @@ SEARCH_INTENT_SYSTEM_PROMPT = """你是一名新闻检索策略师。
    - broad：仅有“AI”“芯片”等大类，可能产生大量无关新闻。
    - focused：有主题和方向，但仍可能存在语义歧义。
    - specific：对象、范围或想了解的问题已经清晰。
-2. 若范围过大或存在歧义，needs_clarification 必须为 true，只提出一个简洁问题，
+2. 若范围过大或存在歧义，只提出一个简洁问题，
    并固定返回 4 个边界清晰、尽量不重复、可独立选择的 interpretations。
-   每个解释都必须自带最终搜索目标、中英文检索词和相关性判断标准，
-   便于用户选择一个或多个方向后直接搜索。
-3. 若意图清晰，needs_clarification 为 false、interpretations 为空，但仍返回一句可供用户确认的 intent_summary。
+   每个解释的 description 必须是独立的搜索目标，明确核心主题和关注点，
+   可直接用来判断新闻是否相关。将最符合原意的选项放在第一位。
+3. 若意图清晰，interpretations 为空，clarification_question 及其英文版为空，
+   但仍返回一句可供用户确认的 intent_summary。
 
 保留用户的核心主题，可补充“新趋势、技术路线、市场、政策、产业化”等
 与问题直接相关的角度，但不得凭空限定某家企业、某项技术或某个结论。
-中文检索词返回 1-3 个，英文检索词返回 1-2 个；每个检索词都要尽量短。
-英文检索词必须是对搜索意图的英文表达，不得把中文原词原样填入 english_queries。
-相关性标准必须能用来判断一篇新闻是否回答了用户的问题。
+整体目标和每个方向各返回一个短中文检索词 chinese_query 和一个短英文检索词 english_query。
+english_query 必须是搜索意图的英文表达，不得原样填入中文。
 
 界面需要中英双语，无论用户输入哪种语言，必须在同一次响应中生成两种文案：
-- intent_summary、clarification_question 以及每个解释的 label、description、intent_summary 使用简体中文。
+- intent_summary、clarification_question 以及每个解释的 label、description 使用简体中文。
 - 对应的所有 *_en 字段必须提供自然、完整的英文翻译，不能缺失、留空或仍用中文。
 - clarification_question 为空时，clarification_question_en 也为空。
 - 英文与中文必须表达完全相同的范围、限定条件和选项；保持选项顺序一致。
@@ -554,10 +620,10 @@ SEARCH_INTENT_SYSTEM_PROMPT = """你是一名新闻检索策略师。
 中英文检索词是检索策略，不能拿关键词列表代替面向用户的完整说明。"""
 
 INTENT_CONCISE_INSTRUCTION = """
-这是需要快速响应的搜索确认界面。摘要只用一句短句；每个选项的中英文标题
-分别不超过 12 个汉字和 8 个英文词，说明分别不超过 35 个汉字和 25 个英文词。
-检索词、主题和相关性标准用简短短语；不要重复背景分析或输出推理过程。
-仍须完整返回全部双语字段和规定数量的选项。"""
+这是需要快速响应的搜索确认界面。摘要、选项说明均用一句短句，
+中文不超过 25 个汉字，英文不超过 15 个词。选项标题中文不超过 10 个汉字、英文不超过 5 个词。
+只返回 Schema 内的字段，不重复输出 target_topics、intent_summary、relevance_criteria 等派生字段到选项中。
+不要背景分析或推理过程，仍须完整返回双语字段及规定数量的选项。"""
 
 
 def fallback_search_intent(
@@ -698,7 +764,7 @@ def _request_chat_completion_json(
             "thinking": {"type": "disabled" if fast_intent else thinking_mode}
         }
     if fast_intent:
-        request_options["max_tokens"] = 4096
+        request_options["max_tokens"] = 2400
         host = urlsplit(os.getenv("OPENAI_BASE_URL", "")).hostname
         if host in {"api.siliconflow.cn", "api.siliconflow.com"} and "deepseek-v4" in model_name.lower():
             # SiliconFlow uses enable_thinking, not DeepSeek's thinking object.
@@ -976,6 +1042,43 @@ def _normalize_interpretation(
     }
 
 
+def _expand_intent_draft(data: dict[str, Any], query: str) -> dict[str, Any]:
+    """Expand one bilingual goal per direction into the existing app contract."""
+    draft = SearchIntentDraft.model_validate(data)
+    if draft.interpretations and len(draft.interpretations) != 4:
+        raise ValueError("搜索意图必须返回四个细分方向或不返回方向")
+
+    def search_fields(summary: str, english_summary: str, cn: str, en: str) -> dict[str, Any]:
+        return {
+            "intent_summary": summary,
+            "intent_summary_en": english_summary,
+            "target_topics": [query],
+            "chinese_queries": [cn],
+            "english_queries": [en],
+            "relevance_criteria": [f"新闻核心内容直接回答以下搜索目标：{summary}"],
+        }
+
+    return {
+        **search_fields(draft.intent_summary, draft.intent_summary_en, draft.chinese_query, draft.english_query),
+        "scope_level": draft.scope_level,
+        "needs_clarification": bool(draft.interpretations or draft.clarification_question),
+        "clarification_question": draft.clarification_question,
+        "clarification_question_en": draft.clarification_question_en,
+        "recommended_interpretation_index": 0,
+        "interpretations": [
+            {
+                **search_fields(item.description, item.description_en, item.chinese_query, item.english_query),
+                "label": item.label,
+                "label_en": item.label_en,
+                "description": item.description,
+                "description_en": item.description_en,
+                "target_topics": [query, item.label],
+            }
+            for item in draft.interpretations
+        ],
+    }
+
+
 def _normalize_search_intent_payload(
     payload: dict[str, Any],
     query: str,
@@ -997,6 +1100,8 @@ def _normalize_search_intent_payload(
                 break
     if not core_fields.intersection(data):
         raise ValueError("搜索意图响应缺少核心字段")
+    if "chinese_query" in data or "english_query" in data:
+        data = _expand_intent_draft(data, query)
 
     summary = str(data.get("intent_summary") or "").strip()
     if not summary:
@@ -1072,9 +1177,7 @@ def analyze_search_intent(
         raise ValueError("搜索内容不能为空")
     provider_name = (provider or get_ai_provider()).strip().lower()
     if provider_name not in {"openai", "gemini", "deepseek"}:
-        raise ValueError(
-            f"不支持的 AI_PROVIDER：{provider_name}，可选值为 openai、gemini 或 deepseek"
-        )
+        raise SearchIntentError("configuration")
     model_name = model or get_intent_model(provider_name)
     started = time.monotonic()
     deadline = started + get_intent_timeout()
@@ -1082,11 +1185,13 @@ def analyze_search_intent(
     base_user_prompt = f"【用户原始搜索】{cleaned_query}"
     retry_instruction = ""
     last_error = "AI 未返回有效的搜索意图"
+    error_code = "invalid_response"
 
     for attempt in range(1, 3):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             last_error = "搜索意图请求超时"
+            error_code = "timeout"
             break
         user_prompt = base_user_prompt + retry_instruction
         try:
@@ -1104,9 +1209,9 @@ def analyze_search_intent(
                     ],
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
-                        response_schema=SearchIntentSchema,
+                        response_schema=SearchIntentDraft,
                         temperature=0.1,
-                        max_output_tokens=4096,
+                        max_output_tokens=2400,
                     ),
                 )
                 if not response.text:
@@ -1125,8 +1230,8 @@ def analyze_search_intent(
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    text_format=SearchIntentSchema,
-                    max_output_tokens=4096,
+                    text_format=SearchIntentDraft,
+                    max_output_tokens=2400,
                 )
                 if response.output_parsed is None:
                     raise ValueError("OpenAI 返回空响应")
@@ -1144,12 +1249,16 @@ def analyze_search_intent(
                         system_prompt,
                         user_prompt,
                         provider_name,
-                        response_schema=SearchIntentSchema,
+                        response_schema=SearchIntentDraft,
                         fast_intent=True,
                     ),
                     cleaned_query,
                 )
             )
+        except AIConfigurationError:
+            error_code = "configuration"
+            last_error = SearchIntentError.REASONS[error_code]
+            break
         except ValidationError as exc:
             invalid_fields = _validation_field_summary(exc)
             last_error = f"AI 返回字段格式不符合要求（字段：{invalid_fields}）"
@@ -1177,10 +1286,8 @@ def analyze_search_intent(
             )
             logger.warning("搜索意图响应无效 (attempt %d/2): %s", attempt, exc)
         except Exception as exc:
-            if provider_name == "gemini":
-                last_error = _classify_gemini_error(exc, model_name)
-            else:
-                last_error = _classify_openai_error(exc, model_name)
+            error_code = _intent_error_code(exc)
+            last_error = SearchIntentError.REASONS[error_code]
             # Transport/auth/rate-limit failures should not restart the wait.
             break
 
@@ -1188,7 +1295,7 @@ def analyze_search_intent(
         "搜索意图未完成 provider=%s model=%s elapsed=%.2fs reason=%s",
         provider_name, model_name, time.monotonic() - started, last_error,
     )
-    raise ArticleAnalysisError(f"搜索意图 AI 返回异常：{last_error}")
+    raise SearchIntentError(error_code)
 
 
 SOURCE_CREDIBILITY_SYSTEM_PROMPT = """你是一名新闻搜索初筛审查员。
