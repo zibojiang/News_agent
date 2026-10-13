@@ -1234,6 +1234,9 @@ def _apply_completed_search_task(snapshot: dict[str, Any]) -> None:
         st.session_state.search_task_notice = str(
             snapshot.get("message") or "没有找到可分析的文章。"
         )
+        diagnostics = dict(snapshot.get("search_diagnostics") or {})
+        if diagnostics and not diagnostics.get("extracted"):
+            st.session_state.search_task_diagnostics = diagnostics
         _clear_active_search_task()
         return
     results = {
@@ -1673,6 +1676,18 @@ def _render_search_page(cloud_demo: bool) -> None:
     task_notice = str(st.session_state.pop("search_task_notice", "")).strip()
     if task_notice:
         st.warning(localize(task_notice))
+    search_diagnostics = st.session_state.pop("search_task_diagnostics", None)
+    if search_diagnostics:
+        st.caption(t(
+            "找到 {candidates} 条新闻链接，未能取得可分析的正文。链接解析失败 {unresolved} 条；正文不可用 {unavailable} 条；正文过短 {too_short} 条；其他抓取失败 {errors} 条。",
+            "Found {candidates} news links, but no usable article text. Unresolved links: {unresolved}; unavailable text: {unavailable}; text too short: {too_short}; other extraction failures: {errors}.",
+        ).format(**search_diagnostics))
+        if search_diagnostics.get("fallback_used"):
+            st.caption(t("已尝试 Bing 备用新闻源。", "The Bing fallback news source was also tried."))
+        st.info(t(
+            "本次未进入新闻评分和正文分析，因此这两个步骤没有调用 AI。搜索意图确认是单独的步骤。可以调整关键词后重试。",
+            "News scoring and content analysis did not run, so neither step called the AI. Search intent confirmation is a separate step. Try adjusting your keywords and searching again.",
+        ))
     st.markdown(
         t("\n        <div class=\"news-hero\">\n            <div class=\"hero-kicker\">Travel Intelligence Search</div>\n            <div class=\"main-header\">找到值得读的文旅新闻</div>\n            <p class=\"sub-header\">输入一个公司、事件或行业关键词。系统会搜索真实新闻、分析相关性，<br>并把包含可核验数字的内容整理成案例。</p>\n        </div>\n        ", "\n        <div class=\"news-hero\">\n            <div class=\"hero-kicker\">Travel Intelligence Search</div>\n            <div class=\"main-header\">Find travel news worth reading</div>\n            <p class=\"sub-header\">Enter a company, event, or industry keyword. Search real news, assess relevance,<br>and turn verifiable figures into useful cases.</p>\n        </div>\n        "),
         unsafe_allow_html=True,

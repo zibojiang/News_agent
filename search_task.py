@@ -79,6 +79,7 @@ def _run_background_search(
                 progress=min(0.3, 0.03 + 0.27 * found / max(1, total)),
             )
 
+        search_diagnostics: dict[str, Any] = {}
         fetched_articles = agent.fetch_and_pre_score(
             industry_keyword=str(request["primary_query"]),
             max_articles=int(request["max_articles"]),
@@ -86,9 +87,11 @@ def _run_background_search(
             english_keyword=str(request.get("english_keyword") or "") or None,
             additional_queries=list(request.get("chinese_queries") or []),
             english_queries=list(request.get("english_queries") or []),
+            diagnostics=search_diagnostics,
         )
         articles = fetched_articles
         search_seconds = perf_counter() - search_started
+        _update_task(task_id, search_diagnostics=search_diagnostics)
         if not articles:
             _update_task(
                 task_id,
@@ -98,7 +101,7 @@ def _run_background_search(
                 progress=1.0,
                 articles=[],
                 results={},
-                run_summary={},
+                run_summary={"search_seconds": search_seconds, "analyzed": 0},
             )
             return
 

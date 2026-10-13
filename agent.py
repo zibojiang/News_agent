@@ -1992,6 +1992,7 @@ def fetch_and_pre_score(
     english_keyword: str | None = None,
     additional_queries: list[str] | None = None,
     english_queries: list[str] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """抓取新闻列表并执行预 AI 质量评分（纯算法），返回文章列表供前端展示。
 
@@ -2005,6 +2006,7 @@ def fetch_and_pre_score(
         english_keyword: 可选英文检索词
         additional_queries: AI 意图理解生成的额外中文检索词
         english_queries: AI 意图理解生成的英文检索词
+        diagnostics: 输出正文抓取统计，不包含 API 密钥
 
     Returns:
         已含 quality_pre 字段的文章列表
@@ -2029,6 +2031,7 @@ def fetch_and_pre_score(
         english_query=english_keyword,
         additional_queries=additional_queries,
         english_queries=english_queries,
+        diagnostics=diagnostics,
     )
 
     # 兼容自定义抓取器或测试替身没有执行回调的情况。

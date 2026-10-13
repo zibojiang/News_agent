@@ -10,6 +10,6 @@ requests>=2.32.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
 lxml>=5.0.0
-googlenewsdecoder>=0.1.7
+googlenewsdecoder>=0.2.1,<0.3.0
 # googlenewsdecoder uses selectolax.parser, removed in selectolax 1.0.
 selectolax>=0.4.12,<1.0.0

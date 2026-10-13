@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -66,7 +66,7 @@ def _safe_get(url: str, timeout: int = REQUEST_TIMEOUT) -> requests.Response | N
     except requests.Timeout:
         logger.warning("请求超时: %s", url)
     except requests.HTTPError as exc:
-        logger.warning("HTTP 错误 %s: %s", exc.response.status_code if exc.response else "?", url)
+        logger.warning("HTTP 错误 %s: %s", exc.response.status_code if exc.response is not None else "?", url)
     except requests.RequestException as exc:
         logger.warning("网络请求失败: %s — %s", url, exc)
     return None
@@ -123,18 +123,27 @@ def _resolve_final_url(url: str) -> str:
     Returns:
         媒体原文 URL；解析失败时返回原始 URL
     """
-    if "news.google.com" in url:
+    parsed_url = urlparse(url)
+    if parsed_url.hostname == "news.google.com":
         try:
             result = gnewsdecoder(url)
-            if result.get("status") and result.get("decoded_url"):
+            # 0.2.x returns `success`; older versions returned `status`.
+            if result.get("success", result.get("status", False)) and result.get("decoded_url"):
                 decoded = result["decoded_url"]
                 logger.debug("Google News 链接已解码: %s -> %s", url[:60], decoded)
                 return decoded
             logger.warning("Google News 链接解码失败: %s", result)
         except Exception as exc:
             logger.warning("Google News 解码异常: %s — %s", url[:60], exc)
+        # An unresolved Google landing page is not a publisher article.
+        return url
 
-    # 非 Google News 链接，或解码失败时，尝试 HTTP 重定向
+    if parsed_url.hostname in {"bing.com", "www.bing.com"} and parsed_url.path == "/news/apiclick.aspx":
+        target = parse_qs(parsed_url.query).get("url", [""])[0]
+        if urlparse(target).scheme in {"http", "https"} and urlparse(target).hostname:
+            return target
+
+    # 其他媒体链接跟随 HTTP 重定向。
     try:
         response = requests.head(
             url,
@@ -261,6 +270,27 @@ def _merge_news_sources(
     return sorted(selected[:max_articles], key=_source_priority, reverse=True)
 
 
+def _fetch_bing_news(
+    query: str, max_articles: int, english_query: str | None = None,
+) -> list[dict[str, Any]]:
+    """Fallback also used when Google finds links but no bodies can be read."""
+    searches = list(dict.fromkeys(q.strip() for q in (query, english_query or "") if q.strip()))
+    source_results: list[tuple[str, list[dict[str, Any]]]] = []
+    with ThreadPoolExecutor(max_workers=max(1, len(searches))) as executor:
+        futures = {}
+        for search_query in searches:
+            language = "zh" if re.search(r"[\u4e00-\u9fff]", search_query) else "en"
+            market = "zh-CN" if language == "zh" else "en-US"
+            rss_url = f"https://www.bing.com/news/search?q={quote_plus(search_query)}&format=rss&mkt={market}"
+            futures[executor.submit(_fetch_rss_news, rss_url, max_articles, "Bing News")] = language
+        for future in as_completed(futures):
+            source_results.append((futures[future], future.result()))
+    articles = _merge_news_sources(source_results, max_articles)
+    for item in articles:
+        item["feed_provider"] = "bing"
+    return articles
+
+
 def fetch_latest_news(
     query: str,
     max_articles: int = MAX_ARTICLES_PER_RUN,
@@ -313,7 +343,6 @@ def fetch_latest_news(
     if re.search(r"[A-Za-z]", query):
         english_candidates.append(query)
     english_searches = unique_queries(english_candidates, limit=5)
-    encoded_query = quote_plus(query)
     logger.info("开始抓取真实新闻列表，关键词: %s", query)
 
     google_sources: list[tuple[str, str, str]] = []
@@ -358,10 +387,9 @@ def fetch_latest_news(
                 errors.append(f"{source_name} 无有效结果")
 
     if not source_results:
-        bing_url = f"https://www.bing.com/news/search?q={encoded_query}&format=rss"
-        fetched = _fetch_rss_news(bing_url, max_articles, "Bing News")
+        fetched = _fetch_bing_news(query, max_articles, english_query)
         if fetched:
-            source_results.append(("zh", fetched))
+            source_results.extend((item["language"], [item]) for item in fetched)
         else:
             errors.append("Bing News 无有效结果")
 
@@ -407,6 +435,8 @@ def extract_article_text(
 
     if resolve_url:
         url = _resolve_final_url(url)
+    if urlparse(url).hostname == "news.google.com":
+        return ""
 
     response = _safe_get(url)
     if response is None:
@@ -479,6 +509,7 @@ def fetch_and_extract_batch(
     english_query: str | None = None,
     additional_queries: list[str] | None = None,
     english_queries: list[str] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
     抓取新闻列表并并行提取正文，含质量预筛。
@@ -492,10 +523,16 @@ def fetch_and_extract_batch(
         english_query: 可选英文检索词
         additional_queries: AI 生成的额外中文检索词
         english_queries: AI 生成的英文检索词
+        diagnostics: 可选输出统计，说明链接解析或正文抓取失败的阶段
 
     Returns:
         包含 title/url/source/published_at/content/content_hash 的字典列表
     """
+    stats = diagnostics if diagnostics is not None else {}
+    stats.update(candidates=0, extracted=0, unresolved=0, unavailable=0,
+                 too_short=0, errors=0, fallback_used=False)
+    if max_articles <= 0:
+        return []
     # 多抓一些以备质量筛选
     # 保留少量候选供正文质量筛选，避免为 8 篇结果预先访问 16 个网站。
     fetch_count = max(8, max_articles + 4)
@@ -511,17 +548,19 @@ def fetch_and_extract_batch(
         news_list = fetch_latest_news(query, max_articles=fetch_count)
     results: list[dict[str, Any]] = []
 
-    def _extract_one(item: dict[str, Any]) -> dict[str, Any] | None:
+    def _extract_one(item: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
         # URL 解析与正文抓取放在同一线程中，并确保每条链接只解析一次。
         url = _resolve_final_url(item["url"])
+        if urlparse(url).hostname == "news.google.com":
+            return None, "unresolved"
         content = extract_article_text(url, resolve_url=False)
         if not content:
             logger.warning("跳过无正文文章: %s", item.get("title"))
-            return None
+            return None, "unavailable"
         if len(content) < min_content_length:
             logger.warning("跳过低质量文章（正文 %d 字）: %s",
                            len(content), item.get("title")[:50])
-            return None
+            return None, "too_short"
         return {
             "title": item["title"],
             "url": url,
@@ -532,28 +571,51 @@ def fetch_and_extract_batch(
             "content_hash": hashlib.sha256(
                 _clean_text(content).encode("utf-8")
             ).hexdigest(),
-        }
+        }, "extracted"
 
-    executor = ThreadPoolExecutor(max_workers=max_workers)
-    reached_limit = False
-    try:
-        futures = {executor.submit(_extract_one, item): item for item in news_list}
-        for future in as_completed(futures):
-            result = future.result()
-            if result is not None:
-                results.append(result)
-                if article_callback is not None:
-                    try:
-                        article_callback(result, len(results), max_articles)
-                    except Exception as exc:
-                        logger.warning("文章进度回调失败: %s", type(exc).__name__)
-                if len(results) >= max_articles:
-                    reached_limit = True
-                    break
-    finally:
-        # 已凑够目标文章时立即返回，不再等待剩余慢站点超时。
-        executor.shutdown(wait=not reached_limit, cancel_futures=reached_limit)
+    seen_urls: set[str] = set()
+
+    def extract_candidates(items: list[dict[str, Any]]) -> None:
+        candidates = []
+        for item in items:
+            if item["url"] not in seen_urls:
+                seen_urls.add(item["url"])
+                candidates.append(item)
+        stats["candidates"] += len(candidates)
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        reached_limit = False
+        try:
+            futures = {executor.submit(_extract_one, item): item for item in candidates}
+            for future in as_completed(futures):
+                try:
+                    result, outcome = future.result()
+                except Exception as exc:
+                    # One broken publisher must not discard the other results.
+                    stats["errors"] += 1
+                    logger.warning("单篇正文提取失败: %s", type(exc).__name__)
+                    continue
+                stats[outcome] += 1
+                if result is not None:
+                    results.append(result)
+                    if article_callback is not None:
+                        try:
+                            article_callback(result, len(results), max_articles)
+                        except Exception as exc:
+                            logger.warning("文章进度回调失败: %s", type(exc).__name__)
+                    if len(results) >= max_articles:
+                        reached_limit = True
+                        break
+        finally:
+            # 已凑够目标文章时立即返回，不再等待剩余慢站点超时。
+            executor.shutdown(wait=not reached_limit, cancel_futures=reached_limit)
+
+    stats["fallback_used"] = any(item.get("feed_provider") == "bing" for item in news_list)
+    extract_candidates(news_list)
+    if not results and not stats["fallback_used"]:
+        stats["fallback_used"] = True
+        fallback_query = english_query or next(iter(english_queries or []), None)
+        extract_candidates(_fetch_bing_news(query, fetch_count, fallback_query))
 
     logger.info("提取完成 %d/%d 篇有效正文",
-                len(results), len(news_list))
+                len(results), stats["candidates"])
     return results

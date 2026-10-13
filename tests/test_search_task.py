@@ -84,6 +84,27 @@ class SearchTaskTestCase(unittest.TestCase):
         self.assertEqual(snapshot["status"], "failed")
         self.assertIn("RuntimeError", snapshot["error"])
 
+    def test_no_article_bodies_preserves_diagnostics_and_never_calls_scoring_ai(self) -> None:
+        def fetch(**kwargs):
+            kwargs["diagnostics"].update(candidates=8, extracted=0, unresolved=8, fallback_used=True)
+            return []
+
+        with (
+            patch("search_task.agent.fetch_and_pre_score", side_effect=fetch),
+            patch("search_task.agent.score_sources_with_ai") as source_ai,
+            patch("search_task.agent.run_pipeline") as body_ai,
+        ):
+            task_id = start_background_search({
+                "primary_query": "AI hardware accelerator", "confirmed_keyword": "AI hardware accelerator",
+                "max_articles": 8, "min_score": 70,
+            }, workspace=self.workspace)
+            snapshot = self._wait(task_id)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(snapshot["search_diagnostics"]["unresolved"], 8)
+        self.assertEqual(snapshot["run_summary"]["analyzed"], 0)
+        source_ai.assert_not_called()
+        body_ai.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

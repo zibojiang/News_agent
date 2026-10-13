@@ -5,10 +5,108 @@ from concurrent.futures import Future
 from unittest.mock import patch
 from urllib.parse import quote_plus
 
-from scraper import fetch_and_extract_batch, fetch_latest_news
+from scraper import _resolve_final_url, extract_article_text, fetch_and_extract_batch, fetch_latest_news
 
 
 class ScraperBatchTestCase(unittest.TestCase):
+    def test_accepts_current_and_legacy_google_decoder_success_fields(self) -> None:
+        for flag in ("success", "status"):
+            with (
+                self.subTest(flag=flag),
+                patch("scraper.gnewsdecoder", return_value={flag: True, "decoded_url": "https://example.com/story"}),
+                patch("scraper.requests.head") as head,
+            ):
+                self.assertEqual(_resolve_final_url("https://news.google.com/rss/articles/id"), "https://example.com/story")
+                head.assert_not_called()
+
+    def test_rejects_unresolved_google_landing_page_without_fetching_it(self) -> None:
+        with (
+            patch("scraper.gnewsdecoder", return_value={"success": False, "message": "Unavailable"}),
+            patch("scraper.requests.head") as head,
+            patch("scraper._safe_get") as get,
+        ):
+            self.assertEqual(extract_article_text("https://news.google.com/rss/articles/id"), "")
+        head.assert_not_called()
+        get.assert_not_called()
+
+    def test_bing_click_link_resolves_directly_to_publisher(self) -> None:
+        publisher = "https://example.com/story?item=1&lang=en"
+        with patch("scraper.requests.head") as head:
+            result = _resolve_final_url("http://www.bing.com/news/apiclick.aspx?url=" + quote_plus(publisher))
+        self.assertEqual(result, publisher)
+        head.assert_not_called()
+
+    def test_uses_bing_when_google_links_have_no_readable_bodies(self) -> None:
+        google = {"title": "AI hardware", "url": "https://news.google.com/rss/articles/id"}
+        bing = {"title": "AI hardware", "url": "https://example.com/news"}
+        stats = {}
+        with (
+            patch("scraper.fetch_latest_news", return_value=[google]),
+            patch("scraper.gnewsdecoder", return_value={"success": False}),
+            patch("scraper._fetch_bing_news", return_value=[bing]) as fallback,
+            patch("scraper.requests.head", side_effect=RuntimeError("publisher error")),
+        ):
+            # A broken article is counted, not allowed to abort the entire batch.
+            self.assertEqual(fetch_and_extract_batch("AI hardware", diagnostics=stats), [])
+        fallback.assert_called_once()
+        self.assertEqual(stats["candidates"], 2)
+        self.assertEqual(stats["unresolved"], 1)
+        self.assertEqual(stats["errors"], 1)
+        self.assertTrue(stats["fallback_used"])
+
+    def test_bing_can_recover_the_same_headline_using_a_direct_link(self) -> None:
+        items = [{"title": "AI hardware", "url": "https://news.google.com/rss/articles/id"}]
+        fallback_items = [{"title": "AI hardware", "url": "https://example.com/news"}]
+        stats = {}
+        with (
+            patch("scraper.fetch_latest_news", return_value=items),
+            patch("scraper._resolve_final_url", side_effect=lambda url: url),
+            patch("scraper._fetch_bing_news", return_value=fallback_items),
+            patch("scraper.extract_article_text", return_value="Article text. " * 30),
+        ):
+            results = fetch_and_extract_batch("AI hardware", max_articles=1, diagnostics=stats)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["url"], fallback_items[0]["url"])
+        self.assertEqual(stats["unresolved"], 1)
+        self.assertEqual(stats["extracted"], 1)
+
+    def test_does_not_repeat_bing_fallback_and_reports_empty_or_short_text(self) -> None:
+        items = [
+            {"title": "Unavailable", "url": "https://example.com/empty", "feed_provider": "bing"},
+            {"title": "Short", "url": "https://example.com/short", "feed_provider": "bing"},
+        ]
+        stats = {}
+        with (
+            patch("scraper.fetch_latest_news", return_value=items),
+            patch("scraper._resolve_final_url", side_effect=lambda url: url),
+            patch("scraper._fetch_bing_news") as fallback,
+            patch("scraper.extract_article_text", side_effect=lambda url, **kw: "Short text" if url.endswith("short") else ""),
+        ):
+            results = fetch_and_extract_batch("AI hardware", diagnostics=stats)
+        self.assertEqual(results, [])
+        fallback.assert_not_called()
+        self.assertEqual(stats["unavailable"], 1)
+        self.assertEqual(stats["too_short"], 1)
+
+    def test_one_broken_publisher_does_not_discard_another_article(self) -> None:
+        items = [
+            {"title": "Bad", "url": "https://example.com/bad"},
+            {"title": "Good", "url": "https://example.com/good"},
+        ]
+        def extract(url, **kwargs):
+            if url.endswith("bad"):
+                raise ValueError("Bad page")
+            return "Valid article. " * 30
+        with (
+            patch("scraper.fetch_latest_news", return_value=items),
+            patch("scraper._resolve_final_url", side_effect=lambda url: url),
+            patch("scraper.extract_article_text", side_effect=extract),
+            patch("scraper._fetch_bing_news") as fallback,
+        ):
+            results = fetch_and_extract_batch("AI hardware", max_articles=2)
+        self.assertEqual([x["title"] for x in results], ["Good"])
+        fallback.assert_not_called()
+
     def test_does_not_send_untranslated_chinese_query_to_english_feed(self) -> None:
         requested_sources = []
 

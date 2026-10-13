@@ -38,6 +38,30 @@ class AppSmokeTestCase(unittest.TestCase):
     def _load_state(self):
         return load_last_search_state(db_path=self.workspace.db_path)
 
+    def test_empty_completed_search_explains_extraction_failure_in_both_languages(self) -> None:
+        snapshot = {
+            "status": "completed", "articles": [], "message": "没有找到可分析的文章",
+            "search_diagnostics": {
+                "candidates": 8, "extracted": 0, "unresolved": 5,
+                "unavailable": 2, "too_short": 1, "errors": 0, "fallback_used": True,
+            },
+        }
+        for language, expected_caption, expected_info in (
+            ("en", "Found 8 news links", "News scoring and content analysis did not run"),
+            ("zh", "找到 8 条新闻链接", "本次未进入新闻评分和正文分析"),
+        ):
+            with self.subTest(language=language), patch(
+                "search_task.get_background_search", return_value=snapshot,
+            ):
+                app = AppTest.from_file(PROJECT_ROOT / "app.py")
+                app.session_state["ui_language"] = language
+                app.session_state["private_workspace"] = self.workspace
+                app.session_state["active_search_task_id"] = "empty-task"
+                app.run(timeout=20)
+            self.assertEqual(list(app.exception), [])
+            self.assertTrue(any(expected_caption in item.value for item in app.caption))
+            self.assertTrue(any(expected_info in item.value for item in app.info))
+
     def test_discards_legacy_cards_in_a_new_streamlit_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = str(Path(temp_dir) / "industry_news.db")
