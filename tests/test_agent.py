@@ -16,6 +16,7 @@ from agent import (
     SourceCredibilitySchema,
     _build_source_credibility_prompt,
     _keep_verifiable_evidence,
+    _normalize_search_intent_payload,
     analyze_article,
     analyze_article_with_chat_completions,
     analyze_search_intent,
@@ -74,6 +75,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
     def test_search_intent_generates_chinese_and_english_queries(self) -> None:
         intent = SearchIntentSchema(
             intent_summary="了解数字集成电路产业的新技术和产业化方向",
+            intent_summary_en="Explore new technologies and commercialization in digital integrated circuits.",
             target_topics=["数字集成电路", "技术趋势", "产业化"],
             chinese_queries=["数字集成电路 产业 新方向"],
             english_queries=["digital integrated circuit industry trends"],
@@ -107,6 +109,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
     def test_search_intent_normalizes_compatible_api_field_types(self) -> None:
         malformed_intent = {
             "intent_summary": "对比美国和中国 AI 产业的发展",
+            "intent_summary_en": "Compare the US and Chinese AI industries.",
             "target_topics": "美国AI产业与中国AI产业",
             "chinese_queries": "美国AI产业 中国AI产业 对比",
             "english_queries": "US China AI industry comparison",
@@ -157,6 +160,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
         )
         valid_intent = SearchIntentSchema(
             intent_summary="对比美国和中国 AI 产业的发展",
+            intent_summary_en="Compare the US and Chinese AI industries.",
             target_topics=["美国AI产业", "中国AI产业"],
             chinese_queries=["美国 中国 AI 产业 对比"],
             english_queries=["US China AI industry comparison"],
@@ -210,6 +214,60 @@ class AgentEvidenceTestCase(unittest.TestCase):
         self.assertEqual(result.interpretations[1].label, "AI 应用与商业化")
         self.assertTrue(result.interpretations[1].english_queries)
         self.assertEqual(result.interpretations[3].label, "AI 政策与治理")
+
+    def test_intent_translations_survive_normalization_and_multi_selection(self) -> None:
+        intent = fallback_search_intent("AI").model_dump()
+        normalized = _normalize_search_intent_payload(intent, "AI")
+        self.assertEqual(normalized, intent)
+        confirmed = merge_search_interpretations(normalized, [1, 2])
+        self.assertIn("commercialization", confirmed["intent_summary_en"])
+        self.assertIn("foundation models", confirmed["intent_summary_en"])
+        self.assertEqual(confirmed["selected_intents"][0]["label_en"], "AI applications and commercialization")
+        self.assertEqual(confirmed["chinese_queries"], ["AI 行业应用 商业化 案例", "大模型 AI 芯片 算力 最新动态"])
+        self.assertEqual(confirmed["clarification_question_en"], "")
+
+    def test_missing_or_chinese_english_copy_is_rejected(self) -> None:
+        for field in ("intent_summary_en", "clarification_question_en", "label_en", "description_en", "option_summary"):
+            for invalid_value in ("", "仍然是中文 AI 内容"):
+                with self.subTest(field=field, value=invalid_value):
+                    payload = fallback_search_intent("AI").model_dump()
+                    if field in {"label_en", "description_en", "option_summary"}:
+                        key = "intent_summary_en" if field == "option_summary" else field
+                        payload["interpretations"][0][key] = invalid_value
+                    else:
+                        payload[field] = invalid_value
+                    with self.assertRaisesRegex(ValueError, "English intent fields"):
+                        _normalize_search_intent_payload(payload, "AI")
+
+    def test_intent_translation_validation_runs_for_all_providers(self) -> None:
+        valid = fallback_search_intent("AI")
+        incomplete = valid.model_copy(update={"intent_summary_en": ""})
+        for provider in ("openai", "gemini", "deepseek"):
+            with (
+                self.subTest(provider=provider),
+                patch.dict(os.environ, {"OPENAI_BASE_URL": "", "DEEPSEEK_THINKING": "disabled"}),
+                patch("agent._get_openai_client") as openai_client,
+                patch("agent._get_gemini_client") as gemini_client,
+                patch("agent.time.sleep"),
+            ):
+                openai_client.return_value.responses.parse.side_effect = [
+                    SimpleNamespace(output_parsed=item) for item in (incomplete, valid)
+                ]
+                gemini_client.return_value.models.generate_content.side_effect = [
+                    SimpleNamespace(text=item.model_dump_json()) for item in (incomplete, valid)
+                ]
+                openai_client.return_value.chat.completions.create.side_effect = [
+                    SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=item.model_dump_json()))])
+                    for item in (incomplete, valid)
+                ]
+                result = analyze_search_intent("AI", provider=provider, model="test-model")
+                self.assertEqual(result.intent_summary_en, valid.intent_summary_en)
+                if provider == "gemini":
+                    self.assertEqual(gemini_client.return_value.models.generate_content.call_count, 2)
+                elif provider == "openai":
+                    self.assertEqual(openai_client.return_value.responses.parse.call_count, 2)
+                else:
+                    self.assertEqual(openai_client.return_value.chat.completions.create.call_count, 2)
 
     def test_merges_multiple_selected_search_interpretations(self) -> None:
         intent = {
@@ -272,6 +330,7 @@ class AgentEvidenceTestCase(unittest.TestCase):
     def test_custom_openai_endpoint_uses_chat_completions_for_intent(self) -> None:
         intent = SearchIntentSchema(
             intent_summary="了解海外产品与中国供应链研发的协同",
+            intent_summary_en="Explore how overseas products and Chinese supply chain R&D work together.",
             target_topics=["overseas products", "China supply chain R&D"],
             chinese_queries=["海外产品 中国供应链 研发"],
             english_queries=["overseas products China supply chain R&D"],

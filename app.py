@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from i18n import (
     get_language,
     init_language,
+    intent_text,
     label_formatter,
     localize,
     localize_dataframe,
@@ -985,7 +986,9 @@ def _render_article_cards(
             fallback_reason = str(intent.get("fallback_reason", "")).strip()
             if fallback_reason:
                 st.caption(t("降级原因：{reason}", "Fallback reason: {reason}").format(reason=localize(fallback_reason)))
-        st.info(t("🧠 AI 理解的搜索目标：{intent}", "🧠 AI interpretation of your search: {intent}").format(intent=intent["intent_summary"]))
+        summary_text = intent_text(intent, "intent_summary")
+        if summary_text:
+            st.info(t("🧠 AI 理解的搜索目标：{intent}", "🧠 AI interpretation of your search: {intent}").format(intent=summary_text))
         with st.expander(t("查看本次中英文检索策略", "View Chinese and English search strategy")):
             selected_intents = intent.get("selected_intents", []) or []
             target_topics = intent.get("target_topics", []) or []
@@ -997,8 +1000,8 @@ def _render_article_cards(
                 for selected_intent in selected_intents:
                     if isinstance(selected_intent, dict):
                         st.markdown(
-                            f"- {selected_intent.get('label', t('检索方向', 'Search direction'))}: "
-                            f"{selected_intent.get('intent_summary', '')}"
+                            f"- {intent_text(selected_intent, 'label')}: "
+                            f"{intent_text(selected_intent, 'intent_summary')}"
                         )
             if target_topics:
                 st.markdown(t("**目标主题：**", "**Target topics:** ") + " · ".join(map(str, target_topics)))
@@ -1470,6 +1473,16 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
     intent = review.get("intent", {})
     if not isinstance(intent, dict):
         return
+    if get_language() == "en" and (
+        not intent.get("intent_summary_en")
+        or (intent.get("clarification_question") and not intent.get("clarification_question_en"))
+        or any(
+            not item.get("label_en") or not item.get("description_en")
+            for item in intent.get("interpretations", []) if isinstance(item, dict)
+        )
+    ):
+        st.info("This earlier search plan has no English version. Submit your keywords again to generate a bilingual plan.")
+        return
     revision = int(review.get("revision", 0) or 0)
     scope_labels = {
         "broad": t("范围较广", "Broad scope"),
@@ -1483,11 +1496,11 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
             st.warning(
                 t("AI 本次未返回可用的搜索意图格式，已按关键词结构生成可确认的备用方案。", "AI could not return a usable search plan. A fallback based on your keywords is ready to confirm.")
             )
-            st.caption(t("降级原因：{reason}", "Fallback reason: {reason}").format(reason=localize(review['fallback_reason'])))
+            st.caption(t("已保留原始关键词。你可以直接确认，也可以补充更具体的搜索目标。", "Your original keywords are preserved. Confirm below or refine your request."))
         scope = str(intent.get("scope_level", "specific"))
         st.caption(t("搜索范围：{scope}", "Search scope: {scope}").format(scope=scope_labels.get(scope, t('待确认', 'To confirm'))))
         st.markdown(
-            t("**我理解您想查找：**\n\n{intent}", "**You want to find:**\n\n{intent}").format(intent=intent.get('intent_summary', ''))
+            t("**我理解您想查找：**\n\n{intent}", "**You want to find:**\n\n{intent}").format(intent=intent_text(intent, "intent_summary"))
         )
 
         interpretations = intent.get("interpretations", [])
@@ -1495,7 +1508,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
         available_options: list[tuple[int, dict[str, Any]]] = []
         if isinstance(interpretations, list) and interpretations:
             question = str(
-                intent.get("clarification_question")
+                intent_text(intent, "clarification_question")
                 or t("请选择一个或多个希望检索的细分方向。", "Select one or more directions to explore.")
             )
             st.markdown(f"**{question}**")
@@ -1521,19 +1534,19 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
                     position = row_start + offset
                     with option_columns[offset]:
                         selected = st.checkbox(
-                            str(item.get("label") or t("方向 {number}", "Direction {number}").format(number=position + 1)),
+                            intent_text(item, "label") or t("方向 {number}", "Direction {number}").format(number=position + 1),
                             value=index == recommended,
-                            help=str(item.get("description") or ""),
+                            help=intent_text(item, "description"),
                             key=f"intent_option_{revision}_{index}",
                         )
-                        description = str(item.get("description") or "").strip()
+                        description = intent_text(item, "description").strip()
                         if description:
                             st.caption(description)
                         if selected:
                             selected_indexes.append(index)
             st.caption(t("以上方向可单选或多选。", "Select one or more directions."))
         elif intent.get("clarification_question"):
-            st.markdown(f"**{intent['clarification_question']}**")
+            st.markdown(f"**{intent_text(intent, 'clarification_question')}**")
 
         custom_intent = st.text_area(
             t("或者，直接输入你真正想搜索的内容", "Or describe exactly what you want to find"),
@@ -1600,6 +1613,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
             intent_to_confirm["interpretations"] = []
             intent_to_confirm["needs_clarification"] = False
             intent_to_confirm["clarification_question"] = ""
+            intent_to_confirm["clarification_question_en"] = ""
             indexes_to_confirm = None
 
         confirmed = _confirmed_intent_from_review(
@@ -2025,3 +2039,4 @@ st.caption(t(
     "本次会话的搜索与其他访客隔离。关闭页面前，可将所需结果导出保存。",
     "Your session's searches are separate from other visitors. Export results you want to keep before leaving.",
 ))
+st.markdown('<footer class="footer-note">Zibo Jiang · Fosun</footer>', unsafe_allow_html=True)

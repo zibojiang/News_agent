@@ -810,6 +810,7 @@ class BilingualAppTestCase(unittest.TestCase):
             "original_query": "AI",
             "intent": {
                 "intent_summary": "了解 AI 行业与应用",
+                "intent_summary_en": "Explore the AI industry and applications.",
                 "target_topics": ["AI"],
                 "chinese_queries": ["AI 新闻"],
                 "english_queries": ["AI news"],
@@ -817,9 +818,10 @@ class BilingualAppTestCase(unittest.TestCase):
                 "scope_level": "broad",
                 "needs_clarification": True,
                 "clarification_question": "选择想了解的方向。",
+                "clarification_question_en": "Which directions would you like to explore?",
                 "interpretations": [
-                    {"label": "AI 行业", "description": "行业动态"},
-                    {"label": "AI 应用", "description": "商业应用"},
+                    {"label": "AI 行业", "description": "行业动态", "label_en": "AI industry", "description_en": "Industry developments"},
+                    {"label": "AI 应用", "description": "商业应用", "label_en": "AI applications", "description_en": "Commercial applications"},
                 ],
                 "recommended_interpretation_index": 0,
             },
@@ -832,6 +834,10 @@ class BilingualAppTestCase(unittest.TestCase):
         app.session_state["search_intent_review"] = copy.deepcopy(review)
         app.run(timeout=20)
         self.assertEqual(list(app.exception), [])
+        self.assertEqual(app.checkbox(key="intent_option_3_0").label, "AI industry")
+        self.assertTrue(any("Explore the AI industry and applications." in item.value for item in app.markdown))
+        self.assertTrue(any("Which directions would you like to explore?" in item.value for item in app.markdown))
+        self.assertFalse(any("了解 AI 行业与应用" in item.value for item in app.markdown))
         app.checkbox(key="intent_option_3_0").uncheck()
         app.checkbox(key="intent_option_3_1").check()
         app.text_area(key="intent_custom_3").input("AI 应用的量化商业案例")
@@ -845,6 +851,8 @@ class BilingualAppTestCase(unittest.TestCase):
                 self.assertEqual(list(app.exception), [])
                 self.assertEqual(app.session_state["ui_language"], language)
                 self.assertFalse(app.checkbox(key="intent_option_3_0").value)
+                self.assertEqual(app.checkbox(key="intent_option_3_0").label, "AI 行业" if language == "zh" else "AI industry")
+                self.assertTrue(any(("行业动态" if language == "zh" else "Industry developments") == item.value for item in app.caption))
                 self.assertTrue(app.checkbox(key="intent_option_3_1").value)
                 self.assertEqual(
                     app.text_area(key="intent_custom_3").value, "AI 应用的量化商业案例"
@@ -852,6 +860,32 @@ class BilingualAppTestCase(unittest.TestCase):
                 self.assertEqual(app.session_state["search_intent_review"], review)
             analyze_intent.assert_not_called()
             fetch_news.assert_not_called()
+
+    def test_initial_english_search_and_fallback_render_bilingual_intent(self) -> None:
+        for fail in (False, True):
+            with self.subTest(fallback=fail):
+                app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+                model = fallback_search_intent("AI")
+                model.intent_summary = "了解 AI 硬件加速器的发展"
+                model.intent_summary_en = "Explore developments in AI hardware accelerators."
+                with (
+                    patch("agent.analyze_search_intent", return_value=model, side_effect=RuntimeError("测试失败") if fail else None) as analyze,
+                    patch("agent.fetch_and_pre_score") as fetch,
+                ):
+                    app.text_input(key="search_keyword").input("AI")
+                    app.button(key="search_submit").click().run(timeout=20)
+                    self.assertEqual(list(app.exception), [])
+                    self.assertEqual(app.checkbox(key="intent_option_0_1").label, "AI applications and commercialization")
+                    visible = "\n".join(item.value for group in (app.markdown, app.caption, app.warning) for item in group)
+                    self.assertNotIn("了解 AI 硬件", visible)
+                    self.assertNotIn("测试失败", visible)
+                    self.assertIn("Zibo Jiang · Fosun", visible)
+                    if not fail:
+                        self.assertIn(model.intent_summary_en, visible)
+                    app.button(key="language_toggle").click().run(timeout=20)
+                    self.assertEqual(app.checkbox(key="intent_option_0_1").label, "AI 应用与商业化")
+                    analyze.assert_called_once_with("AI")
+                    fetch.assert_not_called()
 
     def test_language_query_parameter_restores_preference(self) -> None:
         app = AppTest.from_file(PROJECT_ROOT / "app.py")

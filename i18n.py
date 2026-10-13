@@ -35,6 +35,11 @@ def t(chinese: str, english: str) -> str:
     return chinese if get_language() == "zh" else english
 
 
+def intent_text(data: dict[str, Any], field: str) -> str:
+    """Choose generated intent copy without changing the underlying search plan."""
+    return str(data.get(field if get_language() == "zh" else f"{field}_en") or "")
+
+
 # Stable database/status values are translated only at the presentation boundary.
 _LABELS = {
     "全部": "All", "待审核": "Pending review", "已确认": "Confirmed",

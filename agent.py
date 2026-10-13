@@ -92,8 +92,11 @@ class SearchInterpretationSchema(BaseModel):
     """宽泛或歧义查询的一个可多选细分方向。"""
 
     label: str = Field(description="供用户多选的简短标题")
+    label_en: str = Field(default="", description="English translation of label")
     description: str = Field(description="说明该解释的范围和关注点")
+    description_en: str = Field(default="", description="English translation of description")
     intent_summary: str = Field(description="选中后可直接使用的最终搜索目标")
+    intent_summary_en: str = Field(default="", description="English translation of intent_summary")
     target_topics: list[str] = Field(description="该解释的核心主题")
     chinese_queries: list[str] = Field(description="该解释的中文新闻检索词")
     english_queries: list[str] = Field(description="该解释的英文新闻检索词")
@@ -104,6 +107,7 @@ class SearchIntentSchema(BaseModel):
     """AI 对用户搜索意图和检索词的结构化理解。"""
 
     intent_summary: str = Field(description="一句话概括用户真正想了解的内容")
+    intent_summary_en: str = Field(default="", description="English translation of intent_summary")
     target_topics: list[str] = Field(description="2-5 个必须关注的主题或方向")
     chinese_queries: list[str] = Field(description="1-3 个中文新闻检索词")
     english_queries: list[str] = Field(description="1-2 个英文新闻检索词")
@@ -119,6 +123,9 @@ class SearchIntentSchema(BaseModel):
     clarification_question: str = Field(
         default="",
         description="向用户提出的单个简洁澄清问题",
+    )
+    clarification_question_en: str = Field(
+        default="", description="English translation of clarification_question; empty if no question"
     )
     interpretations: list[SearchInterpretationSchema] = Field(
         default_factory=list,
@@ -491,7 +498,15 @@ SEARCH_INTENT_SYSTEM_PROMPT = """你是一名新闻检索策略师。
 与问题直接相关的角度，但不得凭空限定某家企业、某项技术或某个结论。
 中文检索词返回 1-3 个，英文检索词返回 1-2 个；每个检索词都要尽量短。
 英文检索词必须是对搜索意图的英文表达，不得把中文原词原样填入 english_queries。
-相关性标准必须能用来判断一篇新闻是否回答了用户的问题。"""
+相关性标准必须能用来判断一篇新闻是否回答了用户的问题。
+
+界面需要中英双语，无论用户输入哪种语言，必须在同一次响应中生成两种文案：
+- intent_summary、clarification_question 以及每个解释的 label、description、intent_summary 使用简体中文。
+- 对应的所有 *_en 字段必须提供自然、完整的英文翻译，不能缺失、留空或仍用中文。
+- clarification_question 为空时，clarification_question_en 也为空。
+- 英文与中文必须表达完全相同的范围、限定条件和选项；保持选项顺序一致。
+- *_en 文案用英文，专有名词采用英文名或拼音；不要夹带未翻译的中文句子。
+中英文检索词是检索策略，不能拿关键词列表代替面向用户的完整说明。"""
 
 
 def fallback_search_intent(
@@ -513,8 +528,11 @@ def fallback_search_intent(
         interpretations = [
             SearchInterpretationSchema(
                 label="广义 AI 行业",
+                label_en="AI industry overview",
                 description="覆盖模型、芯片、应用、投融资与政策等整体动态",
+                description_en="Cover developments in models, chips, applications, investment, and policy.",
                 intent_summary="了解全球人工智能行业的重要新闻、技术趋势和市场变化",
+                intent_summary_en="Find major news, technology trends, and market changes in the global AI industry.",
                 target_topics=["人工智能", "技术趋势", "市场动态"],
                 chinese_queries=["AI 行业 最新动态", "人工智能 技术 市场"],
                 english_queries=["artificial intelligence industry news"],
@@ -522,8 +540,11 @@ def fallback_search_intent(
             ),
             SearchInterpretationSchema(
                 label="AI 应用与商业化",
+                label_en="AI applications and commercialization",
                 description="关注 AI 在具体行业的产品应用、客户案例和投入产出",
+                description_en="Explore AI products, customer use cases, and returns on investment across industries.",
                 intent_summary="查找 AI 在各行业的产品应用、商业化案例和可量化效果",
+                intent_summary_en="Find AI applications, commercialization cases, and measurable results across industries.",
                 target_topics=["AI 应用", "商业化", "行业案例"],
                 chinese_queries=["AI 行业应用 商业化 案例"],
                 english_queries=["AI applications commercialization case studies"],
@@ -531,8 +552,11 @@ def fallback_search_intent(
             ),
             SearchInterpretationSchema(
                 label="大模型与基础设施",
+                label_en="Foundation models and infrastructure",
                 description="关注基础模型、AI 芯片、算力、数据中心和开发工具",
+                description_en="Focus on foundation models, AI chips, compute, data centers, and developer tools.",
                 intent_summary="查找大模型、AI 芯片、算力基础设施和开发工具的最新动态",
+                intent_summary_en="Find the latest developments in foundation models, AI chips, compute infrastructure, and developer tools.",
                 target_topics=["大模型", "AI 芯片", "算力基础设施"],
                 chinese_queries=["大模型 AI 芯片 算力 最新动态"],
                 english_queries=["foundation models AI chips compute infrastructure"],
@@ -540,8 +564,11 @@ def fallback_search_intent(
             ),
             SearchInterpretationSchema(
                 label="AI 政策与治理",
+                label_en="AI policy and governance",
                 description="关注监管政策、行业标准、安全、伦理和治理机制",
+                description_en="Explore regulation, industry standards, safety, ethics, and governance.",
                 intent_summary="查找 AI 监管政策、行业标准、安全伦理和治理机制的最新动态",
+                intent_summary_en="Find the latest AI regulation, standards, safety, ethics, and governance developments.",
                 target_topics=["AI 监管", "行业标准", "AI 治理"],
                 chinese_queries=["AI 监管 政策 标准 治理 最新动态"],
                 english_queries=["AI regulation policy standards governance"],
@@ -550,18 +577,22 @@ def fallback_search_intent(
         ]
         scope_level: Literal["broad", "focused", "specific"] = "broad"
         clarification_question = "“AI”范围较广，请选择一个或多个希望检索的细分方向。"
+        clarification_question_en = "AI is a broad topic. Which directions would you like to explore? Select one or more."
     elif len(topic_parts) >= 2:
         scope_level = "focused"
         clarification_question = (
             f"“{topic_description}”可能存在多种关系，请确认您具体想了解的对象和方向。"
         )
+        clarification_question_en = "Your keywords may relate in several ways. Please confirm the subjects and relationship you want to explore."
     else:
         scope_level = "broad" if len(cleaned_query) <= 6 else "specific"
         clarification_question = (
             f"请确认：您是否希望按“{cleaned_query}”这个目标搜索新闻？"
         )
+        clarification_question_en = "Would you like to search for news directly related to your keywords?"
     return SearchIntentSchema(
         intent_summary=f"查找与“{cleaned_query}”直接相关的最新新闻与产业信息",
+        intent_summary_en="Find the latest news and industry information directly related to your search keywords.",
         target_topics=topic_parts or [cleaned_query],
         chinese_queries=[cleaned_query],
         english_queries=[english] if english else [],
@@ -572,6 +603,7 @@ def fallback_search_intent(
         scope_level=scope_level,
         needs_clarification=True,
         clarification_question=clarification_question,
+        clarification_question_en=clarification_question_en,
         interpretations=interpretations,
         recommended_interpretation_index=0,
     )
@@ -741,7 +773,10 @@ def merge_search_interpretations(
         selected_intents = [
             {
                 "label": str(item.get("label") or "检索方向").strip(),
+                "label_en": str(item.get("label_en") or "").strip(),
                 "description": str(item.get("description") or "").strip(),
+                "description_en": str(item.get("description_en") or "").strip(),
+                "intent_summary_en": str(item.get("intent_summary_en") or "").strip(),
                 "intent_summary": str(
                     item.get("intent_summary") or item.get("label") or ""
                 ).strip(),
@@ -770,6 +805,10 @@ def merge_search_interpretations(
             [item["english_queries"] for item in selected_intents]
         ) or _string_list(intent.get("english_queries"))
         confirmed = {
+            "intent_summary_en": "; ".join(
+                item["intent_summary_en"] for item in selected_intents
+                if item["intent_summary_en"]
+            ),
             "intent_summary": (
                 summaries[0]
                 if len(summaries) == 1
@@ -805,6 +844,7 @@ def merge_search_interpretations(
             "scope_level": "specific",
             "needs_clarification": False,
             "clarification_question": "",
+            "clarification_question_en": "",
             "interpretations": [],
             "recommended_interpretation_index": 0,
             "confirmed_by_user": True,
@@ -865,8 +905,11 @@ def _normalize_interpretation(
     ]
     return {
         "label": label,
+        "label_en": str(value.get("label_en") or "").strip(),
         "description": str(value.get("description") or summary).strip(),
+        "description_en": str(value.get("description_en") or "").strip(),
         "intent_summary": summary,
+        "intent_summary_en": str(value.get("intent_summary_en") or "").strip(),
         "target_topics": topics,
         "chinese_queries": chinese_queries,
         "english_queries": _string_list(value.get("english_queries")),
@@ -917,8 +960,9 @@ def _normalize_search_intent_payload(
     else:
         recommended_index = 0
 
-    return {
+    normalized_payload = {
         "intent_summary": summary,
+        "intent_summary_en": str(data.get("intent_summary_en") or "").strip(),
         "target_topics": _string_list(data.get("target_topics")) or [query],
         "chinese_queries": _string_list(data.get("chinese_queries")) or [query],
         "english_queries": _string_list(data.get("english_queries")),
@@ -929,9 +973,24 @@ def _normalize_search_intent_payload(
         "clarification_question": str(
             data.get("clarification_question") or ""
         ).strip(),
+        "clarification_question_en": str(data.get("clarification_question_en") or "").strip(),
         "interpretations": interpretations,
         "recommended_interpretation_index": recommended_index,
     }
+    # Reject incomplete translations before the UI can show a mixed-language plan.
+    required_english = {"intent_summary_en": normalized_payload["intent_summary_en"]}
+    if normalized_payload["clarification_question"]:
+        required_english["clarification_question_en"] = normalized_payload["clarification_question_en"]
+    for index, item in enumerate(interpretations):
+        for field in ("label_en", "description_en", "intent_summary_en"):
+            required_english[f"interpretations.{index}.{field}"] = item[field]
+    invalid = [
+        field for field, value in required_english.items()
+        if not value or re.search(r"[\u3400-\u9fff]", value)
+    ]
+    if invalid:
+        raise ValueError("Missing or untranslated English intent fields: " + ", ".join(invalid))
+    return normalized_payload
 
 
 def _validation_field_summary(exc: ValidationError) -> str:
@@ -1048,8 +1107,8 @@ def analyze_search_intent(
         except ValueError as exc:
             last_error = str(exc)
             retry_instruction = (
-                "\n【格式修正】上次返回缺少搜索意图核心字段。"
-                "请严格按照 JSON Schema 返回全部字段。"
+                f"\n【格式修正】{last_error}。"
+                "请严格按照 JSON Schema 返回全部字段，并补全 *_en 字段的英文翻译。"
             )
             logger.warning("搜索意图响应无效 (attempt %d/2): %s", attempt, exc)
         except Exception as exc:
