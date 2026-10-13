@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Literal
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from google import genai
@@ -50,6 +52,22 @@ def get_openai_model() -> str:
 
 def get_gemini_model() -> str:
     return os.getenv("GEMINI_MODEL", "gemini-flash-latest").strip()
+
+
+def get_intent_model(provider: str | None = None) -> str:
+    """Allow a separate intent model on the same configured provider."""
+    return os.getenv("INTENT_MODEL", "").strip() or (
+        get_gemini_model() if (provider or get_ai_provider()) == "gemini" else get_openai_model()
+    )
+
+
+def get_intent_timeout() -> float:
+    """Interactive intent requests use a short, bounded request budget."""
+    try:
+        value = float(os.getenv("INTENT_TIMEOUT_SECONDS", "20"))
+    except ValueError:
+        return 20.0
+    return max(5.0, min(60.0, value)) if math.isfinite(value) else 20.0
 
 
 def get_ai_analysis_workers() -> int:
@@ -398,7 +416,7 @@ ANALYST_SYSTEM_PROMPT = """你是一位资深商业分析师，擅长撰写行�
 请基于以下输入进行分析，并严格按 JSON Schema 返回结果。"""
 
 
-def _get_gemini_client() -> genai.Client:
+def _get_gemini_client(*, timeout_seconds: float | None = None) -> genai.Client:
     """
     初始化 Gemini 客户端。
 
@@ -410,10 +428,18 @@ def _get_gemini_client() -> genai.Client:
         raise ValueError(
             "未配置有效的 GEMINI_API_KEY，请在 .env 文件中设置你的 Google AI API Key"
         )
-    return genai.Client(api_key=api_key)
+    options: dict[str, Any] = {}
+    if timeout_seconds is not None:
+        options["http_options"] = types.HttpOptions(
+            timeout=max(1, int(timeout_seconds * 1000)),
+            retry_options=types.HttpRetryOptions(attempts=1),
+        )
+    return genai.Client(api_key=api_key, **options)
 
 
-def _get_openai_client() -> OpenAI:
+def _get_openai_client(
+    *, timeout_seconds: float | None = None, max_retries: int | None = None
+) -> OpenAI:
     """初始化 OpenAI 客户端，不在日志中暴露密钥。"""
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key or api_key == "your_openai_api_key_here":
@@ -421,7 +447,12 @@ def _get_openai_client() -> OpenAI:
             "未配置有效的 OPENAI_API_KEY，请在 .env 或 Streamlit Secrets 中设置"
         )
     base_url = os.getenv("OPENAI_BASE_URL", "").strip() or None
-    return OpenAI(api_key=api_key, base_url=base_url)
+    options: dict[str, Any] = {}
+    if timeout_seconds is not None:
+        options["timeout"] = timeout_seconds
+    if max_retries is not None:
+        options["max_retries"] = max_retries
+    return OpenAI(api_key=api_key, base_url=base_url, **options)
 
 
 def _build_user_prompt(
@@ -507,6 +538,12 @@ SEARCH_INTENT_SYSTEM_PROMPT = """你是一名新闻检索策略师。
 - 英文与中文必须表达完全相同的范围、限定条件和选项；保持选项顺序一致。
 - *_en 文案用英文，专有名词采用英文名或拼音；不要夹带未翻译的中文句子。
 中英文检索词是检索策略，不能拿关键词列表代替面向用户的完整说明。"""
+
+INTENT_CONCISE_INSTRUCTION = """
+这是需要快速响应的搜索确认界面。摘要只用一句短句；每个选项的中英文标题
+分别不超过 12 个汉字和 8 个英文词，说明分别不超过 35 个汉字和 25 个英文词。
+检索词、主题和相关性标准用简短短语；不要重复背景分析或输出推理过程。
+仍须完整返回全部双语字段和规定数量的选项。"""
 
 
 def fallback_search_intent(
@@ -632,6 +669,8 @@ def _request_chat_completion_json(
     user_prompt: str,
     provider_name: str,
     response_schema: type[BaseModel] | None = None,
+    *,
+    fast_intent: bool = False,
 ) -> dict[str, Any]:
     """使用 OpenAI 兼容的 Chat Completions 获取 JSON 对象。"""
     request_options: dict[str, Any] = {}
@@ -642,8 +681,14 @@ def _request_chat_completion_json(
         if thinking_mode not in {"enabled", "disabled"}:
             thinking_mode = "disabled"
         request_options["extra_body"] = {
-            "thinking": {"type": thinking_mode}
+            "thinking": {"type": "disabled" if fast_intent else thinking_mode}
         }
+    if fast_intent:
+        request_options["max_tokens"] = 4096
+        host = urlsplit(os.getenv("OPENAI_BASE_URL", "")).hostname
+        if host in {"api.siliconflow.cn", "api.siliconflow.com"} and "deepseek-v4" in model_name.lower():
+            # SiliconFlow uses enable_thinking, not DeepSeek's thinking object.
+            request_options["extra_body"] = {"enable_thinking": False}
     schema_instruction = "\nRespond with a valid JSON object."
     if response_schema is not None:
         schema_json = json.dumps(
@@ -1016,26 +1061,29 @@ def analyze_search_intent(
         raise ValueError(
             f"不支持的 AI_PROVIDER：{provider_name}，可选值为 openai、gemini 或 deepseek"
         )
-    model_name = (
-        model or get_gemini_model()
-        if provider_name == "gemini"
-        else model or get_openai_model()
-    )
+    model_name = model or get_intent_model(provider_name)
+    started = time.monotonic()
+    deadline = started + get_intent_timeout()
+    system_prompt = SEARCH_INTENT_SYSTEM_PROMPT + INTENT_CONCISE_INSTRUCTION
     base_user_prompt = f"【用户原始搜索】{cleaned_query}"
     retry_instruction = ""
     last_error = "AI 未返回有效的搜索意图"
 
     for attempt in range(1, 3):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last_error = "搜索意图请求超时"
+            break
         user_prompt = base_user_prompt + retry_instruction
         try:
             if provider_name == "gemini":
-                response = _get_gemini_client().models.generate_content(
+                response = _get_gemini_client(timeout_seconds=remaining).models.generate_content(
                     model=model_name,
                     contents=[
                         types.Content(
                             role="user",
                             parts=[
-                                types.Part(text=SEARCH_INTENT_SYSTEM_PROMPT),
+                                types.Part(text=system_prompt),
                                 types.Part(text=user_prompt),
                             ],
                         )
@@ -1044,6 +1092,7 @@ def analyze_search_intent(
                         response_mime_type="application/json",
                         response_schema=SearchIntentSchema,
                         temperature=0.1,
+                        max_output_tokens=4096,
                     ),
                 )
                 if not response.text:
@@ -1054,15 +1103,16 @@ def analyze_search_intent(
                     )
                 )
 
-            client = _get_openai_client()
+            client = _get_openai_client(timeout_seconds=remaining, max_retries=0)
             if _supports_openai_responses_api(provider_name):
                 response = client.responses.parse(
                     model=model_name,
                     input=[
-                        {"role": "system", "content": SEARCH_INTENT_SYSTEM_PROMPT},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
                     text_format=SearchIntentSchema,
+                    max_output_tokens=4096,
                 )
                 if response.output_parsed is None:
                     raise ValueError("OpenAI 返回空响应")
@@ -1077,10 +1127,11 @@ def analyze_search_intent(
                     _request_chat_completion_json(
                         client,
                         model_name,
-                        SEARCH_INTENT_SYSTEM_PROMPT,
+                        system_prompt,
                         user_prompt,
                         provider_name,
                         response_schema=SearchIntentSchema,
+                        fast_intent=True,
                     ),
                     cleaned_query,
                 )
@@ -1116,9 +1167,13 @@ def analyze_search_intent(
                 last_error = _classify_gemini_error(exc, model_name)
             else:
                 last_error = _classify_openai_error(exc, model_name)
-        if attempt < 2:
-            time.sleep(1.0)
+            # Transport/auth/rate-limit failures should not restart the wait.
+            break
 
+    logger.warning(
+        "搜索意图未完成 provider=%s model=%s elapsed=%.2fs reason=%s",
+        provider_name, model_name, time.monotonic() - started, last_error,
+    )
     raise ArticleAnalysisError(f"搜索意图 AI 返回异常：{last_error}")
 
 

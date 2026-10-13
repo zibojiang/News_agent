@@ -887,6 +887,35 @@ class BilingualAppTestCase(unittest.TestCase):
                     analyze.assert_called_once_with("AI")
                     fetch.assert_not_called()
 
+    def test_intent_cache_reuses_success_only_within_same_session_and_model(self) -> None:
+        with patch("agent.analyze_search_intent", return_value=fallback_search_intent("AI")) as analyze:
+            first = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+            first.text_input(key="search_keyword").input("AI")
+            first.button(key="search_submit").click().run(timeout=20)
+            first.slider(key="max_articles").set_value(7)
+            first.button(key="search_submit").click().run(timeout=20)
+            self.assertEqual(list(first.exception), [])
+            self.assertEqual(first.session_state["search_intent_review"]["max_articles"], 7)
+            self.assertEqual(analyze.call_count, 1)
+            second = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+            second.text_input(key="search_keyword").input("AI")
+            second.button(key="search_submit").click().run(timeout=20)
+            self.assertEqual(analyze.call_count, 2)
+            with patch.dict(os.environ, {"INTENT_MODEL": "another-model"}):
+                first.button(key="search_submit").click().run(timeout=20)
+            self.assertEqual(analyze.call_count, 3)
+
+    def test_intent_failure_is_not_cached(self) -> None:
+        with patch("agent.analyze_search_intent", side_effect=[TimeoutError(), fallback_search_intent("AI")]) as analyze:
+            app = AppTest.from_file(PROJECT_ROOT / "app.py").run(timeout=20)
+            app.text_input(key="search_keyword").input("AI")
+            app.button(key="search_submit").click().run(timeout=20)
+            self.assertTrue(app.warning)
+            app.button(key="search_submit").click().run(timeout=20)
+            self.assertEqual(list(app.exception), [])
+            self.assertEqual(analyze.call_count, 2)
+            self.assertEqual(app.session_state["search_intent_review"]["fallback_reason"], "")
+
     def test_language_query_parameter_restores_preference(self) -> None:
         app = AppTest.from_file(PROJECT_ROOT / "app.py")
         app.query_params["lang"] = "zh"

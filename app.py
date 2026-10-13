@@ -39,11 +39,14 @@ from agent import (
     SEARCH_RELEVANCE_DIMENSION_MAXIMA,
     SEARCH_RELEVANCE_DISPLAY_THRESHOLD,
     SEARCH_RELEVANCE_RULE_VERSION,
+    SearchIntentSchema,
     analyze_search_intent,
     calculate_multi_intent_article_limit,
     calculate_recommendation_score,
     fallback_search_intent,
     fetch_and_pre_score,
+    get_ai_provider,
+    get_intent_model,
     merge_search_interpretations,
     run_pipeline,
     score_sources_with_ai,
@@ -84,6 +87,24 @@ def _db_path() -> str:
 
 def _owned_task(task_id: str) -> dict[str, Any] | None:
     return get_background_search(task_id, owner_id=_workspace().owner_id)
+
+
+def _analyze_intent_for_session(query: str) -> SearchIntentSchema:
+    """Reuse successful plans only within this user's current session."""
+    key = (query.strip(), get_ai_provider(), get_intent_model(), os.getenv("OPENAI_BASE_URL", ""))
+    cache = st.session_state.setdefault("intent_plan_cache", {})
+    cached = cache.get(key)
+    if cached and perf_counter() - cached["created_at"] < 900:
+        return SearchIntentSchema.model_validate(cached["intent"])
+    started = perf_counter()
+    try:
+        result = analyze_search_intent(query)
+    finally:
+        logger.info("搜索意图请求耗时 %.2fs", perf_counter() - started)
+    cache[key] = {"created_at": perf_counter(), "intent": result.model_dump()}
+    while len(cache) > 12:
+        cache.pop(next(iter(cache)))
+    return result
 
 
 def _parse_quality_json(raw: Any) -> dict:
@@ -1597,8 +1618,8 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
         if custom_query:
             request_query = custom_query
             try:
-                with st.spinner(t("AI 正在生成检索词…", "AI is generating search queries…")):
-                    custom_model = analyze_search_intent(custom_query)
+                with st.spinner(t("AI 正在生成检索词…", "AI is generating search queries…"), show_time=True):
+                    custom_model = _analyze_intent_for_session(custom_query)
                 fallback_reason = ""
             except Exception as exc:
                 logger.warning("AI 理解自定义搜索内容失败: %s", exc)
@@ -1608,7 +1629,7 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
                         str(review.get("english_keyword", "")) or None
                     ),
                 )
-                fallback_reason = str(exc)
+                fallback_reason = str(exc) or type(exc).__name__
             intent_to_confirm = custom_model.model_dump()
             intent_to_confirm["interpretations"] = []
             intent_to_confirm["needs_clarification"] = False
@@ -1728,8 +1749,8 @@ def _render_search_page(cloud_demo: bool) -> None:
             st.session_state.pop("confirmed_search_request", None)
 
             try:
-                with st.spinner(t("🧠 AI 正在理解你想了解的新闻方向…", "🧠 AI is interpreting your search intent…")):
-                    search_intent_model = analyze_search_intent(keyword)
+                with st.spinner(t("🧠 AI 正在理解你想了解的新闻方向…", "🧠 AI is interpreting your search intent…"), show_time=True):
+                    search_intent_model = _analyze_intent_for_session(keyword)
                 intent_fallback_reason = ""
             except Exception as exc:
                 logger.warning("AI 搜索意图理解失败，使用原始查询: %s", exc)
@@ -1737,7 +1758,7 @@ def _render_search_page(cloud_demo: bool) -> None:
                     keyword,
                     english_query=english_keyword.strip() or None,
                 )
-                intent_fallback_reason = str(exc)
+                intent_fallback_reason = str(exc) or type(exc).__name__
             st.session_state.search_intent_review = {
                 "original_query": keyword,
                 "intent": search_intent_model.model_dump(),

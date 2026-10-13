@@ -17,6 +17,8 @@ from agent import (
     _build_source_credibility_prompt,
     _keep_verifiable_evidence,
     _normalize_search_intent_payload,
+    _get_openai_client,
+    _get_gemini_client,
     analyze_article,
     analyze_article_with_chat_completions,
     analyze_search_intent,
@@ -26,6 +28,7 @@ from agent import (
     get_ai_analysis_workers,
     get_ai_provider,
     get_gemini_model,
+    get_intent_timeout,
     get_openai_model,
     merge_search_interpretations,
     run_pipeline,
@@ -268,6 +271,91 @@ class AgentEvidenceTestCase(unittest.TestCase):
                     self.assertEqual(openai_client.return_value.responses.parse.call_count, 2)
                 else:
                     self.assertEqual(openai_client.return_value.chat.completions.create.call_count, 2)
+
+    def test_intent_uses_short_budget_and_siliconflow_non_thinking_mode(self) -> None:
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=fallback_search_intent("AI").model_dump_json()
+        ))])
+        with (
+            patch.dict(os.environ, {
+                "AI_PROVIDER": "deepseek", "OPENAI_BASE_URL": "https://api.siliconflow.cn/v1",
+                "OPENAI_MODEL": "deepseek-ai/DeepSeek-V4-Pro",
+                "INTENT_MODEL": "deepseek-ai/DeepSeek-V4-Flash", "INTENT_TIMEOUT_SECONDS": "20",
+            }),
+            patch("agent._get_openai_client") as get_client,
+        ):
+            get_client.return_value.chat.completions.create.return_value = response
+            analyze_search_intent("AI")
+            options = get_client.call_args.kwargs
+            self.assertEqual(options["max_retries"], 0)
+            self.assertGreater(options["timeout_seconds"], 0)
+            self.assertLessEqual(options["timeout_seconds"], 20)
+            request = get_client.return_value.chat.completions.create.call_args.kwargs
+            self.assertEqual(request["model"], "deepseek-ai/DeepSeek-V4-Flash")
+            self.assertEqual(request["extra_body"], {"enable_thinking": False})
+            self.assertEqual(request["max_tokens"], 4096)
+            self.assertEqual(get_openai_model(), "deepseek-ai/DeepSeek-V4-Pro")
+
+    def test_intent_transport_failure_does_not_repeat_network_wait(self) -> None:
+        with (
+            patch("agent._get_openai_client") as get_client,
+            patch("agent.time.sleep") as sleep,
+        ):
+            get_client.return_value.chat.completions.create.side_effect = TimeoutError("timed out")
+            with self.assertRaisesRegex(ArticleAnalysisError, "超时"):
+                analyze_search_intent("AI", provider="deepseek")
+            self.assertEqual(get_client.return_value.chat.completions.create.call_count, 1)
+            sleep.assert_not_called()
+
+    def test_intent_format_retry_only_uses_remaining_budget(self) -> None:
+        valid = fallback_search_intent("AI")
+        invalid = valid.model_copy(update={"intent_summary_en": ""})
+        with (
+            patch.dict(os.environ, {"INTENT_TIMEOUT_SECONDS": "20"}),
+            patch("agent._get_openai_client") as get_client,
+            patch("agent.time.monotonic", side_effect=[0, 2, 15]),
+        ):
+            get_client.return_value.chat.completions.create.side_effect = [
+                SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=item.model_dump_json()))])
+                for item in (invalid, valid)
+            ]
+            analyze_search_intent("AI", provider="deepseek")
+            self.assertEqual([call.kwargs["timeout_seconds"] for call in get_client.call_args_list], [18, 5])
+
+    def test_intent_stops_format_retry_when_budget_is_exhausted(self) -> None:
+        with (
+            patch.dict(os.environ, {"INTENT_TIMEOUT_SECONDS": "20"}),
+            patch("agent._get_openai_client") as get_client,
+            patch("agent.time.monotonic", side_effect=[0, 0, 21, 21]),
+        ):
+            get_client.return_value.chat.completions.create.return_value = SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content='{}'))]
+            )
+            with self.assertRaisesRegex(ArticleAnalysisError, "超时"):
+                analyze_search_intent("AI", provider="deepseek")
+            self.assertEqual(get_client.call_count, 1)
+
+    def test_intent_timeouts_reach_sdk_clients_without_changing_defaults(self) -> None:
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "GEMINI_API_KEY": "test-key"}),
+            patch("agent.OpenAI") as openai_client,
+            patch("agent.genai.Client") as gemini_client,
+        ):
+            _get_openai_client(timeout_seconds=7, max_retries=0)
+            self.assertEqual(openai_client.call_args.kwargs["timeout"], 7)
+            self.assertEqual(openai_client.call_args.kwargs["max_retries"], 0)
+            _get_openai_client()
+            self.assertNotIn("timeout", openai_client.call_args.kwargs)
+            self.assertNotIn("max_retries", openai_client.call_args.kwargs)
+            _get_gemini_client(timeout_seconds=7)
+            options = gemini_client.call_args.kwargs["http_options"]
+            self.assertEqual(options.timeout, 7000)
+            self.assertEqual(options.retry_options.attempts, 1)
+            _get_gemini_client()
+            self.assertNotIn("http_options", gemini_client.call_args.kwargs)
+        for configured, expected in (("nan", 20), ("wrong", 20), ("1", 5), ("100", 60)):
+            with patch.dict(os.environ, {"INTENT_TIMEOUT_SECONDS": configured}):
+                self.assertEqual(get_intent_timeout(), expected)
 
     def test_merges_multiple_selected_search_interpretations(self) -> None:
         intent = {
