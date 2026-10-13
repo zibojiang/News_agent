@@ -272,14 +272,21 @@ def _merge_news_sources(
 
 def _fetch_bing_news(
     query: str, max_articles: int, english_query: str | None = None,
+    news_language: str = "both",
 ) -> list[dict[str, Any]]:
     """Fallback also used when Google finds links but no bodies can be read."""
     searches = list(dict.fromkeys(q.strip() for q in (query, english_query or "") if q.strip()))
+    if news_language == "en":
+        searches = [(english_query or query).strip()]
+    elif news_language == "zh":
+        searches = [query.strip()]
     source_results: list[tuple[str, list[dict[str, Any]]]] = []
     with ThreadPoolExecutor(max_workers=max(1, len(searches))) as executor:
         futures = {}
         for search_query in searches:
-            language = "zh" if re.search(r"[\u4e00-\u9fff]", search_query) else "en"
+            language = news_language if news_language in {"en", "zh"} else (
+                "zh" if re.search(r"[\u4e00-\u9fff]", search_query) else "en"
+            )
             market = "zh-CN" if language == "zh" else "en-US"
             rss_url = f"https://www.bing.com/news/search?q={quote_plus(search_query)}&format=rss&mkt={market}"
             futures[executor.submit(_fetch_rss_news, rss_url, max_articles, "Bing News")] = language
@@ -297,6 +304,7 @@ def fetch_latest_news(
     english_query: str | None = None,
     additional_queries: list[str] | None = None,
     english_queries: list[str] | None = None,
+    news_language: str = "both",
 ) -> list[dict[str, Any]]:
     """
     根据行业关键词抓取最新真实新闻列表。
@@ -314,6 +322,7 @@ def fetch_latest_news(
         english_query: 可选英文检索词
         additional_queries: AI 生成的额外中文检索词
         english_queries: AI 生成的英文检索词
+        news_language: en / zh / both，决定新闻源的检索语言
 
     Returns:
         新闻列表，每项包含 title / url / published_at
@@ -321,6 +330,9 @@ def fetch_latest_news(
     Raises:
         RuntimeError: 所有真实新闻源均无法获取数据时抛出
     """
+    if news_language not in {"en", "zh", "both"}:
+        raise ValueError("news_language must be en, zh, or both")
+
     def unique_queries(values: list[str], limit: int) -> list[str]:
         result: list[str] = []
         seen: set[str] = set()
@@ -343,6 +355,11 @@ def fetch_latest_news(
     if re.search(r"[A-Za-z]", query):
         english_candidates.append(query)
     english_searches = unique_queries(english_candidates, limit=5)
+    if news_language == "en":
+        chinese_searches = []
+        english_searches = english_searches or [query]
+    elif news_language == "zh":
+        english_searches = []
     logger.info("开始抓取真实新闻列表，关键词: %s", query)
 
     google_sources: list[tuple[str, str, str]] = []
@@ -387,7 +404,11 @@ def fetch_latest_news(
                 errors.append(f"{source_name} 无有效结果")
 
     if not source_results:
-        fetched = _fetch_bing_news(query, max_articles, english_query)
+        fetched = _fetch_bing_news(
+            query, max_articles,
+            english_query or next(iter(english_searches), None),
+            news_language=news_language,
+        )
         if fetched:
             source_results.extend((item["language"], [item]) for item in fetched)
         else:
@@ -408,6 +429,21 @@ def _clean_text(text: str) -> str:
     """去除多余空白字符，合并连续换行。"""
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def _article_language(text: str, fallback: str) -> str:
+    """Distinguish Chinese/English text within our two supported news feeds.
+
+    Feed locale alone is unreliable: English searches can return Chinese pages.
+    Allow occasional foreign names without treating them as the article language.
+    """
+    chinese = len(re.findall(r"[\u4e00-\u9fff]", text))
+    latin = len(re.findall(r"[A-Za-z]", text))
+    if chinese >= max(4, (chinese + latin) * 0.12):
+        return "zh"
+    if latin >= 10:
+        return "en"
+    return fallback
 
 
 def extract_article_text(
@@ -510,6 +546,7 @@ def fetch_and_extract_batch(
     additional_queries: list[str] | None = None,
     english_queries: list[str] | None = None,
     diagnostics: dict[str, Any] | None = None,
+    news_language: str = "both",
 ) -> list[dict[str, Any]]:
     """
     抓取新闻列表并并行提取正文，含质量预筛。
@@ -524,25 +561,27 @@ def fetch_and_extract_batch(
         additional_queries: AI 生成的额外中文检索词
         english_queries: AI 生成的英文检索词
         diagnostics: 可选输出统计，说明链接解析或正文抓取失败的阶段
+        news_language: en / zh / both；正文语言不匹配的候选不进入 AI 分析
 
     Returns:
         包含 title/url/source/published_at/content/content_hash 的字典列表
     """
     stats = diagnostics if diagnostics is not None else {}
     stats.update(candidates=0, extracted=0, unresolved=0, unavailable=0,
-                 too_short=0, errors=0, fallback_used=False)
+                 too_short=0, errors=0, language_mismatch=0, fallback_used=False)
     if max_articles <= 0:
         return []
     # 多抓一些以备质量筛选
     # 保留少量候选供正文质量筛选，避免为 8 篇结果预先访问 16 个网站。
     fetch_count = max(8, max_articles + 4)
-    if english_query or additional_queries or english_queries:
+    if english_query or additional_queries or english_queries or news_language != "both":
         news_list = fetch_latest_news(
             query,
             max_articles=fetch_count,
             english_query=english_query,
             additional_queries=additional_queries,
             english_queries=english_queries,
+            news_language=news_language,
         )
     else:
         news_list = fetch_latest_news(query, max_articles=fetch_count)
@@ -561,11 +600,17 @@ def fetch_and_extract_batch(
             logger.warning("跳过低质量文章（正文 %d 字）: %s",
                            len(content), item.get("title")[:50])
             return None, "too_short"
+        language = _article_language(content, item.get("language", "zh"))
+        title_language = _article_language(item["title"], language)
+        if news_language != "both" and (
+            language != news_language or title_language != news_language
+        ):
+            return None, "language_mismatch"
         return {
             "title": item["title"],
             "url": url,
             "source": item.get("source", ""),
-            "language": item.get("language", "zh"),
+            "language": language,
             "published_at": item.get("published_at", ""),
             "content": content,
             "content_hash": hashlib.sha256(
@@ -614,7 +659,9 @@ def fetch_and_extract_batch(
     if not results and not stats["fallback_used"]:
         stats["fallback_used"] = True
         fallback_query = english_query or next(iter(english_queries or []), None)
-        extract_candidates(_fetch_bing_news(query, fetch_count, fallback_query))
+        extract_candidates(_fetch_bing_news(
+            query, fetch_count, fallback_query, news_language=news_language,
+        ))
 
     logger.info("提取完成 %d/%d 篇有效正文",
                 len(results), stats["candidates"])

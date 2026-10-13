@@ -9,6 +9,59 @@ from scraper import _resolve_final_url, extract_article_text, fetch_and_extract_
 
 
 class ScraperBatchTestCase(unittest.TestCase):
+    def test_single_language_search_only_requests_that_google_feed(self) -> None:
+        for language, marker in (("en", "hl=en-US"), ("zh", "hl=zh-CN")):
+            urls = []
+            def fetch(url, limit, source_name):
+                urls.append(url)
+                return [{"title": source_name, "url": "https://example.com/news"}]
+            with self.subTest(language=language), patch("scraper._fetch_rss_news", side_effect=fetch):
+                articles = fetch_latest_news(
+                    "人工智能硬件", english_query="AI hardware accelerator",
+                    english_queries=["AI chips"], additional_queries=["算力芯片"],
+                    news_language=language,
+                )
+            self.assertTrue(urls)
+            self.assertTrue(all(marker in url for url in urls))
+            self.assertTrue(all(article["language"] == language for article in articles))
+
+    def test_bing_fallback_respects_english_choice_even_for_chinese_input(self) -> None:
+        urls = []
+        def fetch(url, limit, source_name):
+            urls.append(url)
+            return [] if source_name.startswith("Google") else [
+                {"title": "AI chip report", "url": "https://example.com/news"},
+            ]
+        with patch("scraper._fetch_rss_news", side_effect=fetch):
+            results = fetch_latest_news(
+                "人工智能芯片", english_queries=["AI hardware accelerator"], news_language="en",
+            )
+        bing_urls = [url for url in urls if "bing.com" in url]
+        self.assertEqual(len(bing_urls), 1)
+        self.assertIn("q=AI+hardware+accelerator", bing_urls[0])
+        self.assertIn("mkt=en-US", bing_urls[0])
+        self.assertEqual(results[0]["language"], "en")
+
+    def test_filters_actual_article_language_even_if_feed_labels_are_wrong(self) -> None:
+        items = [
+            {"title": "AI accelerator report", "url": "https://example.com/english", "language": "zh"},
+            {"title": "人工智能硬件加速器市场报告", "url": "https://example.com/chinese", "language": "en"},
+        ]
+        def extract(url, **kwargs):
+            return ("AI hardware revenue rose by 20 percent. " * 30 if url.endswith("english")
+                    else "人工智能硬件加速器市场增长百分之二十。" * 30)
+        for language, expected in (("en", ["en"]), ("zh", ["zh"]), ("both", ["en", "zh"])):
+            stats = {}
+            with (
+                self.subTest(language=language),
+                patch("scraper.fetch_latest_news", return_value=items),
+                patch("scraper._resolve_final_url", side_effect=lambda url: url),
+                patch("scraper.extract_article_text", side_effect=extract),
+            ):
+                results = fetch_and_extract_batch("AI hardware", max_articles=2, news_language=language, diagnostics=stats)
+            self.assertEqual(sorted(x["language"] for x in results), expected)
+            self.assertEqual(stats["language_mismatch"], 0 if language == "both" else 1)
+
     def test_accepts_current_and_legacy_google_decoder_success_fields(self) -> None:
         for flag in ("success", "status"):
             with (

@@ -64,13 +64,15 @@ def _run_background_search(
         _update_task(
             task_id,
             stage="search",
-            message="正在搜索中英文新闻并提取正文…",
+            message="正在搜索新闻并提取正文…",
             progress=0.03,
         )
 
         def article_callback(
             article: dict[str, Any], found: int, total: int
         ) -> None:
+            if request.get("output_language") in {"en", "zh"}:
+                article["output_language"] = request["output_language"]
             articles.append(article)
             _update_task(
                 task_id,
@@ -88,8 +90,12 @@ def _run_background_search(
             additional_queries=list(request.get("chinese_queries") or []),
             english_queries=list(request.get("english_queries") or []),
             diagnostics=search_diagnostics,
+            news_language=str(request.get("news_language") or "both"),
         )
         articles = fetched_articles
+        if request.get("output_language") in {"en", "zh"}:
+            for article in articles:
+                article["output_language"] = request["output_language"]
         search_seconds = perf_counter() - search_started
         _update_task(task_id, search_diagnostics=search_diagnostics)
         if not articles:
@@ -241,6 +247,8 @@ def start_background_search(
             "progress": 0.0,
             "keyword": str(request.get("confirmed_keyword") or ""),
             "search_intent": copy.deepcopy(request.get("search_intent") or {}),
+            "news_language": str(request.get("news_language") or "both"),
+            "output_language": str(request.get("output_language") or ""),
             "articles": [],
             "results": {},
             "run_summary": {},

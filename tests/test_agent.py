@@ -15,6 +15,7 @@ from agent import (
     SearchIntentSchema,
     SourceCredibilitySchema,
     _build_source_credibility_prompt,
+    _analyze_articles_parallel,
     _keep_verifiable_evidence,
     _normalize_search_intent_payload,
     _get_openai_client,
@@ -56,6 +57,42 @@ def _body_quality() -> BodyQualitySchema:
 
 
 class AgentEvidenceTestCase(unittest.TestCase):
+    def test_parallel_analysis_preserves_each_requests_language_and_original_quotes(self) -> None:
+        articles = [
+            {"title": "Original title " + lang, "url": "https://example.com/" + lang,
+             "content": "原文数据增长百分之二十。", "output_language": lang}
+            for lang in ("en", "zh")
+        ]
+        def respond(**kwargs):
+            instruction = kwargs["messages"][0]["content"]
+            self.assertIn("Evidence quotes must remain verbatim; do not translate them.", instruction)
+            english = "Output language: English" in instruction
+            if not english:
+                self.assertIn("Output language: Simplified Chinese", instruction)
+            analysis = NewsCaseSchema(
+                title="Model title", url="https://example.com/model",
+                summary="Revenue rose by 20 percent." if english else "收入增长百分之二十。",
+                bullet_points=[], evidence_quotes=["原文数据增长百分之二十。"],
+                involved_companies=[], regions=[], metric_tags=[], relevance_score=80,
+                source_credibility_score=20, source_credibility_reason="Named source",
+                body_quality=_body_quality(),
+            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=analysis.model_dump_json()))])
+        with (
+            patch.dict(os.environ, {"AI_PROVIDER": "deepseek"}),
+            patch("agent._get_openai_client") as client,
+        ):
+            client.return_value.chat.completions.create.side_effect = respond
+            results = _analyze_articles_parallel(articles, "AI", {}, None)
+        self.assertEqual(client.return_value.chat.completions.create.call_count, 2)
+        self.assertEqual(results[0].summary, "Revenue rose by 20 percent.")
+        self.assertEqual(results[1].summary, "收入增长百分之二十。")
+        for index, result in enumerate(results):
+            self.assertEqual(result.title, articles[index]["title"])
+            self.assertEqual(result.evidence_quotes, ["原文数据增长百分之二十。"])
+            prompt = _build_source_credibility_prompt(articles[index])
+            self.assertIn("Output language: " + ("English" if index == 0 else "Simplified Chinese"), prompt)
+
     def test_ai_settings_are_read_dynamically(self) -> None:
         with patch.dict(
             os.environ,

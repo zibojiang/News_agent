@@ -492,12 +492,26 @@ def _keep_verifiable_evidence(quotes: list[str], article_text: str) -> list[str]
     ]
 
 
+def _analysis_language_instruction(language: str | None) -> str:
+    if language not in {"en", "zh"}:
+        return ""
+    name = "English" if language == "en" else "Simplified Chinese"
+    return (
+        f"\nOutput language: {name}. Write summary, bullet_points, metric_tags, regions "
+        f"and all reason / *_reason explanations in {name}, regardless of the prompt language. "
+        "Keep title, url, entity names and evidence_quotes in their original source form. "
+        "Evidence quotes must remain verbatim; do not translate them. "
+        "Apply the same scoring criteria and numeric ranges."
+    )
+
+
 def _prepare_analysis_prompts(
     article_title: str,
     article_url: str,
     article_text: str,
     industry_keyword: str,
     topic: dict[str, Any] | None,
+    output_language: str | None = None,
 ) -> tuple[str, str]:
     """生成两种模型提供方共用的 system/user prompts。"""
     topic = topic or {}
@@ -509,7 +523,7 @@ def _prepare_analysis_prompts(
     user_prompt = _build_user_prompt(
         article_title, article_url, article_text, industry_keyword, topic
     )
-    return system_prompt, user_prompt
+    return system_prompt + _analysis_language_instruction(output_language), user_prompt
 
 
 SEARCH_INTENT_SYSTEM_PROMPT = """你是一名新闻检索策略师。
@@ -1248,7 +1262,7 @@ def _build_source_credibility_prompt(
 
 请只输出 score、reason、core_topic_match_score、
 information_need_match_score、semantic_coverage_score、directness_score 和
-relevance_reason 字段。不要另外输出相关性总分。"""
+relevance_reason 字段。不要另外输出相关性总分。""" + _analysis_language_instruction(article.get("output_language"))
 
 
 def analyze_source_credibility(
@@ -1580,6 +1594,7 @@ def analyze_article_with_openai(
     industry_keyword: str,
     topic: dict[str, Any] | None = None,
     model: str | None = None,
+    output_language: str | None = None,
 ) -> NewsCaseSchema:
     """使用 OpenAI Responses API 对单篇文章做结构化分析。"""
     if not article_text.strip():
@@ -1593,6 +1608,7 @@ def analyze_article_with_openai(
         article_text,
         industry_keyword,
         topic,
+        output_language=output_language,
     )
 
     last_error = "OpenAI 未返回有效结果"
@@ -1659,6 +1675,7 @@ def analyze_article_with_chat_completions(
     industry_keyword: str,
     topic: dict[str, Any] | None = None,
     model: str | None = None,
+    output_language: str | None = None,
 ) -> NewsCaseSchema:
     """使用 OpenAI 兼容的 Chat Completions API 对单篇文章做结构化分析。
 
@@ -1677,6 +1694,7 @@ def analyze_article_with_chat_completions(
         article_text,
         industry_keyword,
         topic,
+        output_language=output_language,
     )
 
     last_error = "Chat Completions API 未返回有效结果"
@@ -1777,6 +1795,7 @@ def analyze_article_with_gemini(
     industry_keyword: str,
     topic: dict[str, Any] | None = None,
     model: str | None = None,
+    output_language: str | None = None,
 ) -> NewsCaseSchema:
     """
     调用 Gemini 对单篇文章进行结构化案例分析。
@@ -1808,6 +1827,7 @@ def analyze_article_with_gemini(
         article_text,
         industry_keyword,
         topic,
+        output_language=output_language,
     )
 
     last_error = "Gemini 未返回有效结果"
@@ -1908,6 +1928,7 @@ def analyze_article(
     topic: dict[str, Any] | None = None,
     provider: str | None = None,
     model: str | None = None,
+    output_language: str | None = None,
 ) -> NewsCaseSchema:
     """按 AI_PROVIDER 将单篇分析路由到 OpenAI 或 Gemini。"""
     provider_name = (provider or get_ai_provider()).strip().lower()
@@ -1932,6 +1953,7 @@ def analyze_article(
         industry_keyword=industry_keyword,
         topic=topic,
         model=model,
+        output_language=output_language,
     )
 
 
@@ -1993,6 +2015,7 @@ def fetch_and_pre_score(
     additional_queries: list[str] | None = None,
     english_queries: list[str] | None = None,
     diagnostics: dict[str, Any] | None = None,
+    news_language: str = "both",
 ) -> list[dict[str, Any]]:
     """抓取新闻列表并执行预 AI 质量评分（纯算法），返回文章列表供前端展示。
 
@@ -2007,6 +2030,7 @@ def fetch_and_pre_score(
         additional_queries: AI 意图理解生成的额外中文检索词
         english_queries: AI 意图理解生成的英文检索词
         diagnostics: 输出正文抓取统计，不包含 API 密钥
+        news_language: en / zh / both，限制检索的原文语言
 
     Returns:
         已含 quality_pre 字段的文章列表
@@ -2032,6 +2056,7 @@ def fetch_and_pre_score(
         additional_queries=additional_queries,
         english_queries=english_queries,
         diagnostics=diagnostics,
+        news_language=news_language,
     )
 
     # 兼容自定义抓取器或测试替身没有执行回调的情况。
@@ -2070,6 +2095,8 @@ def _analyze_articles_parallel(
                 article_text=article["content"],
                 industry_keyword=industry_keyword,
                 topic=topic,
+                **({"output_language": article["output_language"]}
+                   if article.get("output_language") in {"en", "zh"} else {}),
             ): index
             for index, article in enumerate(articles)
         }

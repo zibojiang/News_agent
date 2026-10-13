@@ -44,7 +44,7 @@ class SearchTaskTestCase(unittest.TestCase):
             "cases": [],
         }
         with (
-            patch("search_task.agent.fetch_and_pre_score", return_value=articles),
+            patch("search_task.agent.fetch_and_pre_score", return_value=articles) as fetch,
             patch("search_task.agent.score_sources_with_ai", return_value=[]),
             patch("search_task.agent.run_pipeline", return_value=run_summary),
         ):
@@ -55,6 +55,8 @@ class SearchTaskTestCase(unittest.TestCase):
                     "max_articles": 8,
                     "min_score": 70,
                     "search_intent": {},
+                    "news_language": "en",
+                    "output_language": "en",
                 },
                 workspace=self.workspace,
             )
@@ -64,6 +66,9 @@ class SearchTaskTestCase(unittest.TestCase):
         self.assertEqual(snapshot["progress"], 1.0)
         self.assertEqual(snapshot["articles"][0]["title"], "测试新闻")
         self.assertEqual(snapshot["results"][0]["recommendation_score"], 86)
+        self.assertEqual(fetch.call_args.kwargs["news_language"], "en")
+        self.assertEqual(snapshot["articles"][0]["output_language"], "en")
+        self.assertEqual(snapshot["news_language"], "en")
 
     def test_background_search_keeps_failure_state(self) -> None:
         with patch(

@@ -89,6 +89,19 @@ def _owned_task(task_id: str) -> dict[str, Any] | None:
     return get_background_search(task_id, owner_id=_workspace().owner_id)
 
 
+def _selected_news_language() -> str:
+    choice = st.session_state.get("news_language", "auto")
+    return choice if choice in {"en", "zh", "both"} else get_language()
+
+
+def _news_language_label(language: str) -> str:
+    return {
+        "en": t("英文原文", "English articles"),
+        "zh": t("中文原文", "Chinese articles"),
+        "both": t("中英双语", "Chinese and English articles"),
+    }[language]
+
+
 def _analyze_intent_for_session(query: str) -> SearchIntentSchema:
     """Reuse successful plans only within this user's current session."""
     key = (query.strip(), get_ai_provider(), get_intent_model(), os.getenv("OPENAI_BASE_URL", ""))
@@ -1523,6 +1536,9 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
             st.caption(t("已保留原始关键词。你可以直接确认，也可以补充更具体的搜索目标。", "Your original keywords are preserved. Confirm below or refine your request."))
         scope = str(intent.get("scope_level", "specific"))
         st.caption(t("搜索范围：{scope}", "Search scope: {scope}").format(scope=scope_labels.get(scope, t('待确认', 'To confirm'))))
+        st.caption(t("新闻语言：{language}", "Article language: {language}").format(
+            language=_news_language_label(_selected_news_language()),
+        ))
         st.markdown(
             t("**我理解您想查找：**\n\n{intent}", "**You want to find:**\n\n{intent}").format(intent=intent_text(intent, "intent_summary"))
         )
@@ -1660,6 +1676,8 @@ def _render_search_intent_review(review: dict[str, Any]) -> None:
             "selected_intent_count": selected_count,
             "min_score": int(review.get("min_score", 70)),
             "english_keyword": str(review.get("english_keyword", "")),
+            "news_language": _selected_news_language(),
+            "output_language": get_language(),
         }
         st.session_state.pop("search_intent_review", None)
         st.session_state.last_search_keyword = request_query
@@ -1684,6 +1702,11 @@ def _render_search_page(cloud_demo: bool) -> None:
         ).format(**search_diagnostics))
         if search_diagnostics.get("fallback_used"):
             st.caption(t("已尝试 Bing 备用新闻源。", "The Bing fallback news source was also tried."))
+        if search_diagnostics.get("language_mismatch"):
+            st.caption(t(
+                "另有 {count} 篇原文语言不符合设置，已跳过。可在搜索设置中选择“中英双语”扩大范围。",
+                "Skipped {count} articles in a different language. Select Chinese and English articles in Search settings to broaden the search.",
+            ).format(count=search_diagnostics["language_mismatch"]))
         st.info(t(
             "本次未进入新闻评分和正文分析，因此这两个步骤没有调用 AI。搜索意图确认是单独的步骤。可以调整关键词后重试。",
             "News scoring and content analysis did not run, so neither step called the AI. Search intent confirmation is a separate step. Try adjusting your keywords and searching again.",
@@ -1719,6 +1742,23 @@ def _render_search_page(cloud_demo: bool) -> None:
                 ),
             )
         with st.expander(t("搜索设置", "Search settings")):
+            # Freeze translated options for callbacks outside the render context.
+            language_options = {
+                value: _news_language_label(value) for value in ("en", "zh", "both")
+            }
+            language_options["auto"] = t(
+                "跟随界面（{language}）", "Follow interface ({language})",
+            ).format(language=_news_language_label(get_language()))
+            st.selectbox(
+                t("新闻原文语言", "Article language"),
+                ["auto", "en", "zh", "both"],
+                key="news_language",
+                format_func=language_options.__getitem__,
+                help=t(
+                    "默认随界面检索同语言原文；也可选择中英双语。设置用于下一次搜索，已有结果保持原样。",
+                    "By default, search articles in the interface language. You can also include both languages. Applies to the next search; existing results stay as they are.",
+                ),
+            )
             option_cols = st.columns(2)
             max_articles = option_cols[0].slider(
                 t("每个检索方向的文章数量", "Articles per direction"),
@@ -1809,6 +1849,13 @@ def _render_search_page(cloud_demo: bool) -> None:
         manual_english_keyword = str(
             confirmed_request.get("english_keyword", "")
         ).strip()
+        news_language = confirmed_request.get("news_language", _selected_news_language())
+        if news_language == "en":
+            english_queries = list(search_intent.get("english_queries") or [])
+            primary_query = manual_english_keyword or (
+                str(english_queries[0]).strip() if english_queries
+                else str(confirmed_request.get("original_query") or confirmed_keyword)
+            )
         st.session_state.fetched_search_intent = search_intent
         task_id = start_background_search(
             {
@@ -1823,6 +1870,8 @@ def _render_search_page(cloud_demo: bool) -> None:
                     search_intent.get("english_queries", []) or []
                 ),
                 "search_intent": search_intent,
+                "news_language": news_language,
+                "output_language": confirmed_request.get("output_language", get_language()),
             },
             workspace=_workspace(),
         )
