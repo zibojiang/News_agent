@@ -25,7 +25,7 @@ class SearchTaskTestCase(unittest.TestCase):
     def test_background_search_completes_and_ranks_results(self) -> None:
         articles = [
             {
-                "title": "测试新闻",
+                "title": "English news article",
                 "url": "https://example.com/news/1",
                 "search_relevance_score": 88,
                 "search_relevance_scored": True,
@@ -64,7 +64,7 @@ class SearchTaskTestCase(unittest.TestCase):
 
         self.assertEqual(snapshot["status"], "completed")
         self.assertEqual(snapshot["progress"], 1.0)
-        self.assertEqual(snapshot["articles"][0]["title"], "测试新闻")
+        self.assertEqual(snapshot["articles"][0]["title"], "English news article")
         self.assertEqual(snapshot["results"][0]["recommendation_score"], 86)
         self.assertEqual(fetch.call_args.kwargs["news_language"], "en")
         self.assertEqual(snapshot["articles"][0]["output_language"], "en")
@@ -88,6 +88,27 @@ class SearchTaskTestCase(unittest.TestCase):
 
         self.assertEqual(snapshot["status"], "failed")
         self.assertIn("RuntimeError", snapshot["error"])
+
+    def test_english_task_filters_wrong_language_before_ai_even_with_stale_preferences(self) -> None:
+        chinese = {"title": "三星发布全新人工智能芯片", "content": "中文原文" * 100, "language": "en"}
+        english = {"title": "New AI accelerator announced", "content": "English article body. " * 30, "url": "https://example.com/en"}
+        def fetch(**kwargs):
+            kwargs["article_callback"](chinese, 1, 2)
+            kwargs["article_callback"](english, 2, 2)
+            return [chinese, english]
+        with (
+            patch("search_task.agent.fetch_and_pre_score", side_effect=fetch) as fetch_news,
+            patch("search_task.agent.score_sources_with_ai", return_value=[]) as score,
+            patch("search_task.agent.run_pipeline", return_value={"details": [], "cases": []}),
+        ):
+            task_id = start_background_search({
+                "primary_query": "AI hardware", "confirmed_keyword": "AI hardware",
+                "max_articles": 2, "min_score": 70, "news_language": "both", "output_language": "en",
+            }, workspace=self.workspace)
+            snapshot = self._wait(task_id)
+        self.assertEqual(fetch_news.call_args.kwargs["news_language"], "en")
+        self.assertEqual([item["title"] for item in score.call_args.args[0]], [english["title"]])
+        self.assertEqual([item["title"] for item in snapshot["articles"]], [english["title"]])
 
     def test_no_article_bodies_preserves_diagnostics_and_never_calls_scoring_ai(self) -> None:
         def fetch(**kwargs):

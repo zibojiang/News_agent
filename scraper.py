@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import json
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -439,11 +440,40 @@ def _article_language(text: str, fallback: str) -> str:
     """
     chinese = len(re.findall(r"[\u4e00-\u9fff]", text))
     latin = len(re.findall(r"[A-Za-z]", text))
-    if chinese >= max(4, (chinese + latin) * 0.12):
+    if chinese and (latin < 10 or chinese >= max(4, (chinese + latin) * 0.12)):
         return "zh"
     if latin >= 10:
         return "en"
     return fallback
+
+
+def article_matches_language(article: dict[str, Any], language: str) -> bool:
+    """Check original text, including older results with missing/wrong feed tags.
+
+    AI summaries may be translated, so they must not determine source language.
+    Saved cases do not include full bodies; use original titles/evidence instead.
+    """
+    if language == "both":
+        return True
+    title = str(article.get("title") or article.get("新闻标题") or "")
+    body = str(article.get("content") or "")
+    if not body:
+        quotes = article.get("evidence_quotes") or article.get("证据原文") or ""
+        if isinstance(quotes, str):
+            try:
+                quotes = json.loads(quotes)
+            except (ValueError, TypeError):
+                pass
+        if isinstance(quotes, list):
+            body = " ".join(str(quote) for quote in quotes)
+        else:
+            body = str(quotes)
+    title_language = _article_language(title, "unknown")
+    body_language = _article_language(body, "unknown")
+    detected = {title_language, body_language} - {"unknown"}
+    if detected:
+        return detected == {language}
+    return article.get("language") == language
 
 
 def extract_article_text(
@@ -601,10 +631,7 @@ def fetch_and_extract_batch(
                            len(content), item.get("title")[:50])
             return None, "too_short"
         language = _article_language(content, item.get("language", "zh"))
-        title_language = _article_language(item["title"], language)
-        if news_language != "both" and (
-            language != news_language or title_language != news_language
-        ):
+        if not article_matches_language({**item, "content": content}, news_language):
             return None, "language_mismatch"
         return {
             "title": item["title"],

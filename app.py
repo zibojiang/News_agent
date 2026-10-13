@@ -68,6 +68,7 @@ from result_table import (
     selected_export_rows,
 )
 from search_task import get_background_search, start_background_search
+from scraper import article_matches_language
 from session_workspace import session_workspace
 
 logging.basicConfig(
@@ -90,8 +91,16 @@ def _owned_task(task_id: str) -> dict[str, Any] | None:
 
 
 def _selected_news_language() -> str:
-    choice = st.session_state.get("news_language", "auto")
-    return choice if choice in {"en", "zh", "both"} else get_language()
+    """UI language is the sole policy; ignore obsolete saved dropdown choices."""
+    return "en" if get_language() == "en" else "both"
+
+
+def _visible_news_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or get_language() == "zh":
+        return frame.copy()
+    return frame.loc[
+        [article_matches_language(row, "en") for row in frame.to_dict("records")]
+    ].copy()
 
 
 def _news_language_label(language: str) -> str:
@@ -452,7 +461,7 @@ def _render_high_quality_results_table(summary: dict[str, Any]) -> None:
         key=f"high_quality_threshold_{run_key}",
         help=t("默认展示 75 分及以上，即“质量良好”和“高质量”的新闻。", "Shows articles scoring 75 or higher by default, including good and high-quality articles."),
     )
-    table_df = build_high_quality_results(summary, min_quality=min_quality)
+    table_df = _visible_news_frame(build_high_quality_results(summary, min_quality=min_quality))
     if table_df.empty:
         st.info(t("本次没有新闻达到 {score} 分的质量门槛。", "No articles in this search reached the quality threshold of {score}.").format(score=min_quality))
         return
@@ -477,12 +486,13 @@ def _render_high_quality_results_table(summary: dict[str, Any]) -> None:
     disabled_columns = [
         column for column in table_df.columns if column not in editable_columns
     ]
-    editor_key = f"high_quality_editor_{run_key}_{min_quality}"
+    editor_key = f"high_quality_editor_{run_key}_{min_quality}_{get_language()}"
     editor_data_key = f"{editor_key}_data"
     editor_saved_key = f"{editor_key}_saved"
     editor_language_key = f"{editor_key}_language"
     if (
         editor_data_key not in st.session_state
+        or editor_key not in st.session_state
         or st.session_state.get(editor_language_key) != get_language()
     ):
         st.session_state[editor_data_key] = st.session_state.get(
@@ -606,7 +616,10 @@ def _render_run_summary(summary: dict[str, Any]) -> None:
             for error in errors:
                 st.error(localize(error))
 
-    details = summary.get("details", [])
+    details = [
+        detail for detail in summary.get("details", [])
+        if article_matches_language(detail, _selected_news_language())
+    ]
     if details:
         details_df = pd.DataFrame(details).rename(
             columns={
@@ -982,6 +995,31 @@ def _render_article_cards(
     if not articles:
         return
 
+    visible_indexes = [
+        index for index, article in enumerate(articles)
+        if article_matches_language(article, _selected_news_language())
+    ]
+    hidden_count = len(articles) - len(visible_indexes)
+    if hidden_count:
+        st.caption(t(
+            "已隐藏 {count} 篇非英文文章；中文模式可查看中英文结果。",
+            "Hidden {count} non-English articles. Switch to Chinese to view both languages.",
+        ).format(count=hidden_count))
+    if not visible_indexes:
+        st.info(t(
+            "本次结果没有英文文章。可切换到中文查看全部结果，或重新搜索英文新闻。",
+            "No English articles in these results. Switch to Chinese to view all results, or start a new search for English news.",
+        ))
+        return
+    # Filter only the rendered view; retain original results and score pairing.
+    if results is not None:
+        results = {
+            new_index: results[old_index]
+            for new_index, old_index in enumerate(visible_indexes)
+            if old_index in results
+        }
+    articles = [articles[index] for index in visible_indexes]
+
     current_pre_scores = []
     for article in articles:
         pre_state = _quality_state(article.get("quality_pre"))
@@ -1351,7 +1389,7 @@ def _render_news_pool() -> None:
         t("<p class=\"section-note\">按主题、审核状态或相关性快速缩小范围。</p>", "<p class=\"section-note\">Filter by topic, review status, or relevance.</p>"),
         unsafe_allow_html=True,
     )
-    news_df = _enrich_with_quality(load_cases(db_path=_db_path()))
+    news_df = _visible_news_frame(_enrich_with_quality(load_cases(db_path=_db_path())))
     filter_cols = st.columns([1, 1, 1, 1])
     topic_filter = filter_cols[0].selectbox(
         t("主题筛选", "Topic filter"),
@@ -1419,7 +1457,7 @@ def _render_case_library(allow_review: bool = False) -> None:
         t("<p class=\"section-note\">只展示达到入库门槛且包含可核验量化信息的新闻。</p>", "<p class=\"section-note\">News that meets the inclusion threshold and contains verifiable quantitative information.</p>"),
         unsafe_allow_html=True,
     )
-    cases_df = _enrich_with_quality(load_cases(qualified_only=True, db_path=_db_path()))
+    cases_df = _visible_news_frame(_enrich_with_quality(load_cases(qualified_only=True, db_path=_db_path())))
     if cases_df.empty:
         st.info(t("暂无达标案例。可以降低搜索页的入库门槛，或尝试更具体的关键词。", "No qualified cases yet. Try a lower inclusion threshold or more specific keywords."))
         return
@@ -1704,8 +1742,8 @@ def _render_search_page(cloud_demo: bool) -> None:
             st.caption(t("已尝试 Bing 备用新闻源。", "The Bing fallback news source was also tried."))
         if search_diagnostics.get("language_mismatch"):
             st.caption(t(
-                "另有 {count} 篇原文语言不符合设置，已跳过。可在搜索设置中选择“中英双语”扩大范围。",
-                "Skipped {count} articles in a different language. Select Chinese and English articles in Search settings to broaden the search.",
+                "另有 {count} 篇非英文原文已跳过。中文模式可搜索中英文文章。",
+                "Skipped {count} non-English articles. Switch to Chinese to search both languages.",
             ).format(count=search_diagnostics["language_mismatch"]))
         st.info(t(
             "本次未进入新闻评分和正文分析，因此这两个步骤没有调用 AI。搜索意图确认是单独的步骤。可以调整关键词后重试。",
@@ -1742,23 +1780,10 @@ def _render_search_page(cloud_demo: bool) -> None:
                 ),
             )
         with st.expander(t("搜索设置", "Search settings")):
-            # Freeze translated options for callbacks outside the render context.
-            language_options = {
-                value: _news_language_label(value) for value in ("en", "zh", "both")
-            }
-            language_options["auto"] = t(
-                "跟随界面（{language}）", "Follow interface ({language})",
-            ).format(language=_news_language_label(get_language()))
-            st.selectbox(
-                t("新闻原文语言", "Article language"),
-                ["auto", "en", "zh", "both"],
-                key="news_language",
-                format_func=language_options.__getitem__,
-                help=t(
-                    "默认随界面检索同语言原文；也可选择中英双语。设置用于下一次搜索，已有结果保持原样。",
-                    "By default, search articles in the interface language. You can also include both languages. Applies to the next search; existing results stay as they are.",
-                ),
-            )
+            st.caption(t(
+                "新闻语言：中文 + 英文。切换到英文模式后，只检索和显示英文新闻。",
+                "Article language: English only. Chinese mode includes both Chinese and English articles.",
+            ))
             option_cols = st.columns(2)
             max_articles = option_cols[0].slider(
                 t("每个检索方向的文章数量", "Articles per direction"),
@@ -1849,7 +1874,7 @@ def _render_search_page(cloud_demo: bool) -> None:
         manual_english_keyword = str(
             confirmed_request.get("english_keyword", "")
         ).strip()
-        news_language = confirmed_request.get("news_language", _selected_news_language())
+        news_language = _selected_news_language()
         if news_language == "en":
             english_queries = list(search_intent.get("english_queries") or [])
             primary_query = manual_english_keyword or (
@@ -1871,7 +1896,7 @@ def _render_search_page(cloud_demo: bool) -> None:
                 ),
                 "search_intent": search_intent,
                 "news_language": news_language,
-                "output_language": confirmed_request.get("output_language", get_language()),
+                "output_language": get_language(),
             },
             workspace=_workspace(),
         )

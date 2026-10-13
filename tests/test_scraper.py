@@ -5,10 +5,26 @@ from concurrent.futures import Future
 from unittest.mock import patch
 from urllib.parse import quote_plus
 
-from scraper import _resolve_final_url, extract_article_text, fetch_and_extract_batch, fetch_latest_news
+from scraper import _resolve_final_url, article_matches_language, extract_article_text, fetch_and_extract_batch, fetch_latest_news
 
 
 class ScraperBatchTestCase(unittest.TestCase):
+    def test_source_language_ignores_wrong_feed_tags_and_translated_summaries(self) -> None:
+        self.assertFalse(article_matches_language({
+            "title": "三星开发用于AI PC的处理器芯片", "language": "en",
+            "content": "据报道，新芯片支持神经网络模型推理。" * 30,
+        }, "en"))
+        self.assertFalse(article_matches_language({
+            "title": "Global AI accelerator report", "language": "en",
+            "content": "中国企业发布全新人工智能芯片。" * 30,
+        }, "en"))
+        self.assertFalse(article_matches_language({"title": "新芯片", "language": "en"}, "en"))
+        self.assertTrue(article_matches_language({
+            "title": "AI hardware sales grow", "summary": "这是 AI 生成的中文摘要。",
+            "evidence_quotes": '["Revenue grew 20 percent."]',
+        }, "en"))
+        self.assertTrue(article_matches_language({"title": "中文新闻"}, "both"))
+
     def test_single_language_search_only_requests_that_google_feed(self) -> None:
         for language, marker in (("en", "hl=en-US"), ("zh", "hl=zh-CN")):
             urls = []

@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 
 import agent
+from scraper import article_matches_language
 from session_workspace import SessionWorkspace
 
 
@@ -59,6 +60,11 @@ def _run_background_search(
     task_id: str, request: dict[str, Any], workspace: SessionWorkspace
 ) -> None:
     articles: list[dict[str, Any]] = []
+    ui_language = request.get("output_language")
+    news_language = (
+        "en" if ui_language == "en" else "both" if ui_language == "zh"
+        else str(request.get("news_language") or "both")
+    )
     search_started = perf_counter()
     try:
         _update_task(
@@ -71,14 +77,16 @@ def _run_background_search(
         def article_callback(
             article: dict[str, Any], found: int, total: int
         ) -> None:
+            if not article_matches_language(article, news_language):
+                return
             if request.get("output_language") in {"en", "zh"}:
                 article["output_language"] = request["output_language"]
             articles.append(article)
             _update_task(
                 task_id,
                 articles=copy.deepcopy(articles),
-                message=f"已搜索到 {found}/{total} 篇有效新闻…",
-                progress=min(0.3, 0.03 + 0.27 * found / max(1, total)),
+                message=f"已搜索到 {len(articles)}/{total} 篇有效新闻…",
+                progress=min(0.3, 0.03 + 0.27 * len(articles) / max(1, total)),
             )
 
         search_diagnostics: dict[str, Any] = {}
@@ -90,14 +98,17 @@ def _run_background_search(
             additional_queries=list(request.get("chinese_queries") or []),
             english_queries=list(request.get("english_queries") or []),
             diagnostics=search_diagnostics,
-            news_language=str(request.get("news_language") or "both"),
+            news_language=news_language,
         )
-        articles = fetched_articles
+        articles = [
+            article for article in fetched_articles
+            if article_matches_language(article, news_language)
+        ]
         if request.get("output_language") in {"en", "zh"}:
             for article in articles:
                 article["output_language"] = request["output_language"]
         search_seconds = perf_counter() - search_started
-        _update_task(task_id, search_diagnostics=search_diagnostics)
+        _update_task(task_id, search_diagnostics=search_diagnostics, news_language=news_language)
         if not articles:
             _update_task(
                 task_id,

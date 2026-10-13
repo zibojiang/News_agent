@@ -253,7 +253,7 @@ class AppSmokeTestCase(unittest.TestCase):
                 original_summary = copy.deepcopy(app.session_state["last_run_summary"])
                 original_saved_state = self._load_state()
                 # AppTest exposes data_editor edits through the widget's state.
-                editor_key = "high_quality_editor_2026-07-30_08:00:00_75"
+                editor_key = "high_quality_editor_2026-07-30_08:00:00_75_zh"
                 app.session_state[editor_key] = {
                     "edited_rows": {
                         0: {"导出": False, "新闻摘要": "用于下载的人工编辑摘要"}
@@ -271,22 +271,13 @@ class AppSmokeTestCase(unittest.TestCase):
                     app.button(key="language_toggle").click().run(timeout=20)
                     self.assertEqual(list(app.exception), [])
                     self.assertEqual(app.session_state["ui_language"], "en")
-                    self.assertTrue(
+                    self.assertFalse(
                         any("当前规则评分新闻" in item.value for item in app.markdown)
                     )
-                    self.assertTrue(
+                    self.assertFalse(
                         any("当前规则生成的摘要" in item.value for item in app.markdown)
                     )
-                    edited_table = next(
-                        item.value for item in app.dataframe if "导出" in item.value.columns
-                    )
-                    self.assertFalse(edited_table.iloc[0]["导出"])
-                    self.assertEqual(
-                        edited_table.iloc[0]["新闻摘要"], "用于下载的人工编辑摘要"
-                    )
-                    self.assertTrue(
-                        any("Select at least one article" in item.value for item in app.warning)
-                    )
+                    self.assertFalse(any("导出" in item.value.columns for item in app.dataframe))
                     app.button(key="language_toggle").click().run(timeout=20)
                     self.assertEqual(list(app.exception), [])
                     edited_table = next(
@@ -764,7 +755,8 @@ class BilingualAppTestCase(unittest.TestCase):
         self.assertEqual(app.session_state["ui_language"], "en")
         self.assertEqual(app.button(key="search_submit").label, "Next: confirm intent")
         self.assertEqual(app.button(key="language_toggle").label, "中/ENG")
-        self.assertEqual(app.selectbox(key="news_language").value, "auto")
+        self.assertFalse(any(item.key == "news_language" for item in app.selectbox))
+        self.assertTrue(any("Article language: English only" in item.value for item in app.caption))
         self.assertFalse(
             any("找到值得读的文旅新闻" in item.value for item in app.markdown)
         )
@@ -801,7 +793,6 @@ class BilingualAppTestCase(unittest.TestCase):
         app.text_input(key="english_keyword").input("overseas products supply chain")
         app.slider(key="max_articles").set_value(13)
         app.slider(key="min_score").set_value(85)
-        app.selectbox(key="news_language").select("both")
         app.selectbox(key="news_status_filter").select("已确认")
         app.selectbox(key="news_sort").select("质量最高")
         app.number_input(key="news_score_filter").set_value(55)
@@ -823,18 +814,18 @@ class BilingualAppTestCase(unittest.TestCase):
                 )
                 self.assertEqual(app.slider(key="max_articles").value, 13)
                 self.assertEqual(app.slider(key="min_score").value, 85)
-                self.assertEqual(app.selectbox(key="news_language").value, "both")
                 self.assertEqual(app.selectbox(key="news_status_filter").value, "已确认")
                 self.assertEqual(app.selectbox(key="news_sort").value, "质量最高")
                 self.assertEqual(app.number_input(key="news_score_filter").value, 55)
             analyze_intent.assert_not_called()
             fetch_news.assert_not_called()
 
-    def test_confirmed_search_uses_current_language_and_allows_bilingual_override(self) -> None:
+    def test_interface_language_overrides_old_saved_article_preferences(self) -> None:
         for ui_language, choice, expected_language, expected_query in (
             ("en", "auto", "en", "AI hardware accelerator"),
-            ("zh", "auto", "zh", "人工智能硬件加速器"),
-            ("en", "both", "both", "人工智能硬件加速器"),
+            ("zh", "auto", "both", "人工智能硬件加速器"),
+            ("en", "both", "en", "AI hardware accelerator"),
+            ("zh", "en", "both", "人工智能硬件加速器"),
         ):
             with self.subTest(language=ui_language, choice=choice):
                 app = AppTest.from_file(PROJECT_ROOT / "app.py")
